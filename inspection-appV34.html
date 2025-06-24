@@ -1,0 +1,2827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>建筑结构检测记录</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#165DFF',
+                        secondary: '#36D399',
+                        warning: '#FFAA33',
+                        danger: '#F87272',
+                        neutral: '#1E293B',
+                        'neutral-light': '#F1F5F9',
+                    },
+                    fontFamily: {
+                        inter: ['Inter', 'system-ui', 'sans-serif'],
+                    },
+                }
+            }
+        }
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            // 获取所有结构类型按钮
+            const structureBtns = document.querySelectorAll('.structure-type-btn');
+            // 获取钢筋信息区域
+            const slabRebarAreas = document.querySelectorAll('.slab-rebar');
+            const beamColumnRebarAreas = document.querySelectorAll('.beam-column-rebar');
+            const wallRebarAreas = document.querySelectorAll('.wall-rebar'); // 新增墙区域
+            // 获取当前结构类型显示元素
+            const currentStructureType = document.getElementById('currentStructureType');
+            document.querySelectorAll('.slab-spacing-input, .wall-spacing-input').forEach(input => {
+    input.addEventListener('input', function() {
+        if (this.classList.contains('slab-spacing-input')) {
+            calculateSlabSpacingAvg();
+        } else if (this.classList.contains('wall-spacing-input')) {
+            calculateWallSpacingAvg();
+        }
+    });
+});
+initializeCoverThicknessInputs();
+            // 按钮点击事件处理
+            structureBtns.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    // 添加当前按钮的激活样式
+                    btn.classList.add('border-primary', 'bg-primary/5', 'text-primary');
+                    // 获取结构类型（梁/板/柱/墙）
+                    const structureType = btn.textContent.trim();
+                    currentStructureType.textContent = structureType;
+                    
+                    // 控制钢筋区域显示隐藏
+                    if (structureType === '板') {
+                        slabRebarAreas.forEach(area => area.style.display = 'block');
+                        beamColumnRebarAreas.forEach(area => area.style.display = 'none');
+                        wallRebarAreas.forEach(area => area.style.display = 'none');
+                    } else if (structureType === '墙') {
+                        slabRebarAreas.forEach(area => area.style.display = 'none');
+                        beamColumnRebarAreas.forEach(area => area.style.display = 'none');
+                        wallRebarAreas.forEach(area => area.style.display = 'block');
+                    } else {
+                        slabRebarAreas.forEach(area => area.style.display = 'none');
+                        beamColumnRebarAreas.forEach(area => area.style.display = 'block');
+                        wallRebarAreas.forEach(area => area.style.display = 'none');
+                    } 
+                    
+                    // 处理主筋组的重新初始化
+                    const mainRebarContainer = document.getElementById('mainRebarContainer');
+                    if(mainRebarContainer) {
+                        mainRebarContainer.innerHTML = ''; // 清空原有主筋组
+                        if(structureType === '梁' || structureType === '柱') {
+                            initMainRebarGroups(); // 重新初始化主筋组（仅梁/柱结构时）
+                        }
+                    }
+                     // 更新截面尺寸输入
+                     updateSectionSizeInputs(structureType);
+                });
+            });
+            // 初始化默认显示梁结构
+            document.getElementById('beamBtn').click();
+            updateSectionSizeInputs('梁');  // 初始化输入项
+            
+            // 初始化回弹容器
+            const reboundContainer = document.getElementById('reboundGroupsContainer');
+            if(reboundContainer) {
+                reboundContainer.innerHTML = '';
+                addReboundGroup();
+            } 
+            
+            const addBtn = document.getElementById('addReboundGroupBtn');
+            if(addBtn) {
+                addBtn.addEventListener('click', addReboundGroup);
+            }
+            
+            // 绑定添加主筋按钮事件
+            const addMainRebarBtn = document.getElementById('addMainRebarBtn');
+            if(addMainRebarBtn) {
+                addMainRebarBtn.addEventListener('click', addMainRebarGroup);
+            }
+            
+            // 绑定保存按钮事件
+            document.getElementById('saveBtn').addEventListener('click', () => {
+            const record = collectFormData();
+            record.recordType = 'rebar'; // 标记为钢筋数据记录
+            saveRecord(record);
+            showSuccessToast();
+            renderHistoryRecords();
+            resetAllInputs();
+            window.scrollTo({
+        top: 0,
+        behavior: 'smooth' // 平滑滚动效果
+    });
+        });
+            //绑定混凝土回弹视图的保存按钮
+            document.getElementById('saveBtnRebound').addEventListener('click', () => {
+            const record = collectReboundFormData(); // 使用专门的回弹数据收集函数
+            record.recordType = 'rebound'; // 标记为混凝土回弹数据记录
+            saveRecord(record);
+            showSuccessToast();
+            renderHistoryRecords();
+            resetAllInputs();
+            window.scrollTo({
+        top: 0,
+        behavior: 'smooth' // 平滑滚动效果
+    });
+        });
+            
+        function collectReboundFormData() {
+            const projectName = document.getElementById('projectName').value;
+            const inspectionDate = document.getElementById('inspectionDate').value;
+            const inspector = document.getElementById('inspector').value;
+            
+            // 混凝土回弹特有字段
+            const componentPart = document.getElementById('componentPart').value;
+            const testSurface = document.getElementById('testSurface').value;
+            const surfaceCondition = document.getElementById('surfaceCondition').value;
+            const testAngle = document.getElementById('testAngle').value;
+            
+            // 收集回弹数据
+            const reboundData = [];
+            document.querySelectorAll('.rebound-group-wrapper').forEach((group, index) => {
+                const reboundPoints = Array.from(group.querySelectorAll('.rebound-points-container input'))
+                    .map(input => input.value || null);
+                const reboundAvg = group.querySelector('.group-rebound-avg')?.textContent || '-';
+                
+                const carbonizationPoints = Array.from(group.querySelectorAll('.carbonization-points-container input'))
+                    .map(input => input.value || null);
+                const carbonizationAvg = group.querySelector('.group-carbonization-avg')?.textContent || '-';
+                
+                reboundData.push({ 
+                    group: index + 1, 
+                    reboundPoints,
+                    reboundAvg,
+                    carbonizationPoints,
+                    carbonizationAvg
+                });
+            });
+
+            return {
+                id: Date.now().toString(),
+                timestamp: new Date().toISOString(),
+                projectName,
+                inspectionDate,
+                inspector,
+                componentPart,
+                testSurface,
+                surfaceCondition,
+                testAngle,
+                reboundData
+            };
+        }
+
+
+
+            // 绑定清空记录按钮事件
+            const clearRecordsBtn = document.getElementById('clearRecordsBtn');
+            if (clearRecordsBtn) {
+                clearRecordsBtn.addEventListener('click', async () => {
+                    const isConfirm = await showConfirmDialog(
+                '确认清空',
+                '确定要清空所有检测记录吗？此操作不可恢复！',
+                '清空',
+                '取消'
+            );
+            
+            if (isConfirm) {
+                localStorage.removeItem('inspectionRecords');
+                renderHistoryRecords();
+                showSuccessToast('已清空所有记录');
+            }
+        });
+    }
+    initializeStirrupSpacingInputs();
+    document.querySelectorAll('.stirrup-spacing-input').forEach(input => {
+                    input.addEventListener('input', calculateStirrupSpacingAvg);
+                });
+                // 初始化历史记录渲染
+                renderHistoryRecords();
+                
+                // 添加视图切换事件
+                document.getElementById('rebarDataBtn').addEventListener('click', () => {
+                    switchView('rebar');
+                });
+                
+                document.getElementById('reboundDataBtn').addEventListener('click', () => {
+                    switchView('rebound');
+                });
+                
+                document.getElementById('historyDataBtn').addEventListener('click', () => {
+                    switchView('history');
+                });
+                
+                // 默认显示钢筋数据视图
+                switchView('rebar');
+            });
+            
+            // 视图切换函数
+            function switchView(viewType) {
+                const rebarView = document.getElementById('rebarView');
+                const reboundView = document.getElementById('reboundView');
+                const historyView = document.getElementById('historyView');
+                const rebarBtn = document.getElementById('rebarDataBtn');
+                const reboundBtn = document.getElementById('reboundDataBtn');
+                const historyBtn = document.getElementById('historyDataBtn');
+                const projectInfoSection = document.getElementById('projectInfoSection');
+                const heightDataSection = document.getElementById('heightDataSection');
+                
+                // 隐藏所有视图
+                rebarView.style.display = 'none';
+                reboundView.style.display = 'none';
+                historyView.style.display = 'none';
+                
+                // 重置所有按钮样式
+                rebarBtn.classList.remove('text-primary');
+                rebarBtn.classList.add('text-gray-400');
+                reboundBtn.classList.remove('text-primary');
+                reboundBtn.classList.add('text-gray-400');
+                historyBtn.classList.remove('text-primary');
+                historyBtn.classList.add('text-gray-400');
+                
+                // 控制项目信息框和层高数据显示
+                if (viewType === 'history') {
+                    projectInfoSection.style.display = 'none';
+                    heightDataSection.style.display = 'none';
+                } else {
+                    projectInfoSection.style.display = 'block';
+                    // 只在钢筋数据视图显示层高数据
+                    heightDataSection.style.display = viewType === 'rebar' ? 'block' : 'none';
+                }
+                
+                if (viewType === 'rebar') {
+                    rebarView.style.display = 'block';
+                    rebarBtn.classList.add('text-primary');
+                    rebarBtn.classList.remove('text-gray-400');
+                } else if (viewType === 'rebound') {
+                    reboundView.style.display = 'block';
+                    reboundBtn.classList.add('text-primary');
+                    reboundBtn.classList.remove('text-gray-400');
+                } else if (viewType === 'history') {
+                    historyView.style.display = 'block';
+                    historyBtn.classList.add('text-primary');
+                    historyBtn.classList.remove('text-gray-400');
+                }
+                window.scrollTo({
+        top: 0,
+        behavior: 'smooth' // 平滑滚动效果
+    });
+            }
+    </script>
+    <style type="text/tailwindcss">
+        /* 历史记录视图样式 */
+        #historyView {
+            display: none; /* 初始隐藏 */
+        }
+        
+        /* 历史记录列表样式 */
+        #recordsList {
+            /* 移除最大高度和滚动条 */
+            max-height: none;
+            overflow-y: visible;
+        }
+        
+        /* 移除滚动条样式 */
+        /* 滚动条样式 - Chrome/Safari/Edge */
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+            .card-shadow {
+                box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            }
+            .input-focus {
+/* 由于 @apply 是 Tailwind CSS 的指令，在纯 CSS 环境下无法识别，需要确保样式文件被 Tailwind 处理。
+   若要在纯 CSS 中实现类似效果，可手动编写样式。 */
+&:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(22, 93, 255, 0.5);
+    border-color: #165DFF;
+}
+            }
+            .animate-fade-in {
+                animation: fadeIn 0.3s ease-in-out;
+            }
+            .animate-slide-up {
+                animation: slideUp 0.4s ease-out;
+            }
+            .animate-pulse-light {
+                animation: pulseLight 2s infinite;
+            }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        /* 添加组间距样式 */
+        .rebound-group-wrapper {
+            border: 1px solid #e2e8f0;
+            border-radius: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+        @keyframes slideUp {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        
+        @keyframes pulseLight {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        
+        /* 历史记录卡片样式 */
+        .history-card {
+            transition: all 0.3s ease;
+        }
+        .history-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 15px rgba(0, 0, 0, 0.1);
+        }
+        
+        /* 视图切换按钮激活样式 */
+        .nav-btn-active {
+            color: #165DFF;
+        }
+        .nav-btn-active i {
+            transform: scale(1.1);
+        }
+        
+        /* 移动端优化 */
+        @media (max-width: 640px) {
+            .mobile-full-width {
+                width: 100% !important;
+            }
+            .mobile-p-4 {
+                padding: 1rem !important;
+            }
+            .mobile-py-3 {
+                padding-top: 0.75rem !important;
+                padding-bottom: 0.75rem !important;
+            }
+            .mobile-text-lg {
+                font-size: 1.125rem !important;
+            }
+            .mobile-text-base {
+                font-size: 1rem !important;
+            }
+            .mobile-gap-2 {
+                gap: 0.5rem !important;
+            }
+            .mobile-grid-cols-1 > * {
+                grid-column: span 1 / span 1 !important;
+            }
+            .mobile-grid-cols-2 > * {
+                grid-column: span 2 / span 2 !important;
+            }
+            .mobile-grid-cols-3 > * {
+                grid-column: span 3 / span 3 !important;
+            }
+            .mobile-grid-cols-4 > * {
+                grid-column: span 4 / span 4 !important;
+            }
+        }
+    </style>
+</head>
+<body class="font-inter bg-neutral-light min-h-screen">
+    <!-- 顶部导航栏 -->
+    <header class="sticky top-0 z-50 bg-white card-shadow">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <div class="flex items-center space-x-2">
+                <i class="fa-solid fa-building text-primary text-2xl"></i>
+                <h1 class="text-xl font-bold text-neutral">结构检测记录</h1>
+            </div>
+            <button id="menuBtn" class="text-neutral p-2 rounded-full hover:bg-primary/10 transition-colors">
+                <i class="fa-solid fa-bars text-xl"></i>
+            </button>
+        </div>
+    </header>
+    <!-- 主内容区 -->
+    <main class="container mx-auto px-4 py-6">
+        <!-- 项目信息卡片 - 移动到所有视图之上 -->
+        <section id="projectInfoSection" class="mb-8 animate-fade-in">
+            <div class="bg-white rounded-xl p-6 card-shadow">
+                <h2 class="mobile-text-lg font-semibold text-neutral mb-4 flex items-center">
+                    <i class="fa-solid fa-info-circle text-primary mr-2"></i>项目信息
+                </h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">项目名称</label>
+                        <input type="text" id="projectName" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all mobile-py-3" placeholder="请输入项目名称">
+                    </div>
+                    <div >
+                        <label class="block text-sm font-medium text-gray-700 mb-1">检测人员</label>
+                        <input type="text" id="inspector" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all mobile-py-3" placeholder="请输入检测人员姓名">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">检测日期</label>
+                        <input type="date" id="inspectionDate" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all mobile-py-3">
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- 层高数据卡片 - 移动到结构类型上方 -->
+        <section id="heightDataSection" class="mb-8 animate-fade-in">
+            <div class="bg-white rounded-xl p-6 card-shadow">
+                <h2 class="mobile-text-lg font-semibold text-neutral mb-4 flex items-center">
+                    <i class="fa-solid fa-ruler-vertical text-primary mr-2"></i>层高数据
+                </h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">构件名称</label>
+                        <input type="text" id="componentName" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all mobile-py-3" placeholder="请输入构件名称">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">检测部位</label>
+                        <input type="text" id="heightLocation" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all mobile-py-3" placeholder="请输入检测部位">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">层高(mm)</label>
+                        <input type="number" id="floorHeight" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all mobile-py-3" placeholder="请输入层高">
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- 钢筋数据视图 -->
+        <div id="rebarView">
+            <!-- 结构类型选择 -->
+            <section class="mb-8 animate-fade-in" style="animation-delay: 0.1s">
+                <div class="bg-white rounded-xl p-6 card-shadow">
+                    <h2 class="mobile-text-lg font-semibold text-neutral mb-4 flex items-center">
+                        <i class="fa-solid fa-list-alt text-primary mr-2"></i>结构类型
+                    </h2>
+                    <div class="grid grid-cols-1 sm:grid-cols-4 gap-3"> <!-- 改为4列 -->
+                        <button id="beamBtn" class="structure-type-btn py-4 rounded-lg border-2 border-primary bg-primary/5 text-primary font-medium transition-all hover:bg-primary/10 active:scale-95">
+                            <i class="fa-solid fa-grip-lines me-2"></i>梁
+                        </button>
+                        <button id="slabBtn" class="structure-type-btn py-4 rounded-lg border-2 border-gray-200 text-gray-500 font-medium transition-all hover:bg-gray-50 active:scale-95">
+                            <i class="fa-solid fa-square me-2"></i>板
+                        </button>
+                        <button id="columnBtn" class="structure-type-btn py-4 rounded-lg border-2 border-gray-200 text-gray-500 font-medium transition-all hover:bg-gray-50 active:scale-95">
+                            <i class="fa-solid fa-columns me-2"></i>柱
+                        </button>
+                        <!-- 新增墙结构按钮 -->
+                        <button id="wallBtn" class="structure-type-btn py-4 rounded-lg border-2 border-gray-200 text-gray-500 font-medium transition-all hover:bg-gray-50 active:scale-95">
+                            <i class="fa-solid fa-grip-lines-vertical me-2"></i>墙
+                        </button>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- 检测数据表单 -->
+            <section id="inspectionForm" class="mb-8 animate-slide-up">
+                <div class="bg-white rounded-xl p-6 card-shadow">
+                    <h2 class="mobile-text-lg font-semibold text-neutral mb-4 flex items-center">
+                        <i class="fa-solid fa-clipboard-list text-primary mr-2"></i><span id="currentStructureType">梁</span>检测数据
+                    </h2>
+                    <!-- 检测部位 -->
+                    <div class="mb-6">
+                        <label class="block text-base font-medium text-gray-700 mb-2">检测部位</label>
+                        <input type="text" id="inspectionLocation" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all mobile-py-3" placeholder="请输入检测部位">
+                    </div>
+                    <!-- 截面尺寸 -->
+                    <div class="mb-6">
+                        <h3 class="mobile-text-base font-medium text-gray-700 mb-3 flex items-center">
+                            <i class="fa-solid fa-arrows-alt-h text-secondary mr-2"></i>截面尺寸
+                        </h3>
+                        <div class="grid grid-cols-1 gap-4" id="sectionSizeContainer">
+                            <!-- 动态生成输入项 -->
+                        </div>
+                    </div>
+                    
+                    <!-- 钢筋信息 -->
+                    <div class="mb-6">
+                        <h3 class="mobile-text-base font-medium text-gray-700 mb-3 flex items-center">
+                            <i class="fa-solid fa-link text-secondary mr-2"></i>钢筋信息
+                        </h3>
+
+                        <!-- 板结构时显示的数字轴/字母轴钢筋信息 -->
+                        <!-- 原主筋和箍筋信息仅在梁/柱结构时显示，此处为板结构的替换内容 -->
+                        <!-- 数字轴钢筋部分调整 -->
+                        <div id="digitalAxisRebar" class="mb-4 p-3 bg-gray-50 rounded-lg slab-rebar" style="display: none;">
+                            <h4 class="mobile-text-base font-medium text-gray-700 mb-3">数字轴钢筋</h4>
+                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                                <!-- 调整后：钢筋类型作为第一个输入项 -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-500 mb-1">钢筋类型</label>
+                                    <input type="text" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="请输入钢筋类型" value="板跨中底部受力筋">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-500 mb-1">钢筋等级</label>
+                                    <select class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base">
+                                        <option value="">请选择</option>
+                                        <option value="HPB300">HPB300</option>
+                                        <option value="HRB335">HRB335</option>
+                                        <option value="HRB400">HRB400</option>
+                                        <option value="HRB500">HRB500</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-500 mb-1">钢筋直径(mm)</label>
+                                    <input type="number" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="直径">
+                                </div>
+                            </div>
+                             <!-- 非加密区间距 -->
+    <!-- 非加密区间距 -->
+    <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+            <span>非加密区间距(mm)</span>
+            <span>平均值: <span id="digitalAxisNonEncryptedAvg">-</span> mm</span>
+        </label>
+        <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+            <input type="number" class="slab-spacing-input slab-digital-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测1" data-axis="digital" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-digital-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测2" data-axis="digital" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-digital-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测3" data-axis="digital" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-digital-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测4" data-axis="digital" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-digital-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测5" data-axis="digital" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-digital-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测6" data-axis="digital" data-type="nonEncrypted">
+        </div>
+    </div>
+    
+    <!-- 加密区间距 -->
+    <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+            <span>加密区间距(mm)</span>
+            <span>平均值: <span id="digitalAxisEncryptedAvg">-</span> mm</span>
+        </label>
+        <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+            <input type="number" class="slab-spacing-input slab-digital-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测1" data-axis="digital" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-digital-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测2" data-axis="digital" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-digital-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测3" data-axis="digital" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-digital-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测4" data-axis="digital" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-digital-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测5" data-axis="digital" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-digital-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测6" data-axis="digital" data-type="encrypted">
+        </div>
+    </div>
+                        </div>
+                        <!-- 字母轴钢筋部分调整 -->
+                        <div id="letterAxisRebar" class="p-3 bg-gray-50 rounded-lg slab-rebar" style="display: none;">
+                            <h4 class="mobile-text-base font-medium text-gray-700 mb-3">字母轴钢筋</h4>
+                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                                <!-- 调整后：钢筋类型作为第一个输入项 -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-500 mb-1">钢筋类型</label>
+                                    <input type="text" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="请输入钢筋类型" value="板跨中底部受力筋">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-500 mb-1">钢筋等级</label>
+                                    <select class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base">
+                                        <option value="">请选择</option>
+                                        <option value="HPB300">HPB300</option>
+                                        <option value="HRB335">HRB335</option>
+                                        <option value="HRB400">HRB400</option>
+                                        <option value="HRB500">HRB500</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-500 mb-1">钢筋直径(mm)</label>
+                                    <input type="number" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="直径">
+                                </div>
+                            </div>
+                            <!-- 非加密区间距 -->
+    <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+            <span>非加密区间距(mm)</span>
+            <span>平均值: <span id="letterAxisNonEncryptedAvg">-</span> mm</span>
+        </label>
+        <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+            <input type="number" class="slab-spacing-input slab-letter-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测1" data-axis="letter" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-letter-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测2" data-axis="letter" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-letter-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测3" data-axis="letter" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-letter-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测4" data-axis="letter" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-letter-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测5" data-axis="letter" data-type="nonEncrypted">
+            <input type="number" class="slab-spacing-input slab-letter-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测6" data-axis="letter" data-type="nonEncrypted">
+        </div>
+    </div>
+    
+    <!-- 加密区间距 -->
+    <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+            <span>加密区间距(mm)</span>
+            <span>平均值: <span id="letterAxisEncryptedAvg">-</span> mm</span>
+        </label>
+        <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+            <input type="number" class="slab-spacing-input slab-letter-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测1" data-axis="letter" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-letter-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测2" data-axis="letter" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-letter-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测3" data-axis="letter" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-letter-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测4" data-axis="letter" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-letter-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测5" data-axis="letter" data-type="encrypted">
+            <input type="number" class="slab-spacing-input slab-letter-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测6" data-axis="letter" data-type="encrypted">
+        </div>
+    </div>
+                        </div>
+                        
+                        <!-- 新增墙结构钢筋信息 -->
+                        <div class="wall-rebar" style="display: none;">
+                            <!-- 横筋配置 -->
+                            <div class="mb-4 p-3 bg-gray-50 rounded-lg">
+                                <h4 class="mobile-text-base font-medium text-gray-700 mb-3">横筋配置</h4>
+                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">钢筋类型</label>
+                                        <input type="text" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="请输入钢筋类型" value="墙身分布筋">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">钢筋等级</label>
+                                        <select class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base">
+                                            <option value="">请选择</option>
+                                            <option value="HPB300">HPB300</option>
+                                            <option value="HRB335">HRB335</option>
+                                            <option value="HRB400">HRB400</option>
+                                            <option value="HRB500">HRB500</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">钢筋直径(mm)</label>
+                                        <input type="number" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="直径">
+                                    </div>
+                                </div>
+                                <!-- 非加密区间距 -->
+    <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+            <span>非加密区间距(mm)</span>
+            <span>平均值: <span id="wallHorizontalNonEncryptedAvg">-</span> mm</span>
+        </label>
+        <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+            <input type="number" class="wall-spacing-input wall-horizontal-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测1" data-type="horizontal" data-area="nonEncrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测2" data-type="horizontal" data-area="nonEncrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测3" data-type="horizontal" data-area="nonEncrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测4" data-type="horizontal" data-area="nonEncrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测5" data-type="horizontal" data-area="nonEncrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测6" data-type="horizontal" data-area="nonEncrypted">
+        </div>
+    </div>
+    
+    <!-- 加密区间距 -->
+    <div class="mb-4">
+        <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+            <span>加密区间距(mm)</span>
+            <span>平均值: <span id="wallHorizontalEncryptedAvg">-</span> mm</span>
+        </label>
+        <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+            <input type="number" class="wall-spacing-input wall-horizontal-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测1" data-type="horizontal" data-area="encrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测2" data-type="horizontal" data-area="encrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测3" data-type="horizontal" data-area="encrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测4" data-type="horizontal" data-area="encrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测5" data-type="horizontal" data-area="encrypted">
+            <input type="number" class="wall-spacing-input wall-horizontal-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测6" data-type="horizontal" data-area="encrypted">
+        </div>
+    </div>
+                            </div>
+                            
+                            <!-- 纵筋配置 -->
+                            <div class="p-3 bg-gray-50 rounded-lg">
+                                <h4 class="mobile-text-base font-medium text-gray-700 mb-3">纵筋配置</h4>
+                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">钢筋类型</label>
+                                        <input type="text" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="请输入钢筋类型" value="墙身分布筋">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">钢筋等级</label>
+                                        <select class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base">
+                                            <option value="">请选择</option>
+                                            <option value="HPB300">HPB300</option>
+                                            <option value="HRB335">HRB335</option>
+                                            <option value="HRB400">HRB400</option>
+                                            <option value="HRB500">HRB500</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">钢筋直径(mm)</label>
+                                        <input type="number" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="直径">
+                                    </div>
+                                </div>
+                                <div class="mb-4">
+                                    <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+                                        <span>非加密区间距(mm)</span>
+                                        <span>平均值: <span id="wallVerticalNonEncryptedAvg">-</span> mm</span>
+                                    </label>
+                                    <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+                                        <input type="number" class="wall-spacing-input wall-vertical-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测1" data-type="vertical" data-area="nonEncrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测2" data-type="vertical" data-area="nonEncrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测3" data-type="vertical" data-area="nonEncrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测4" data-type="vertical" data-area="nonEncrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测5" data-type="vertical" data-area="nonEncrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测6" data-type="vertical" data-area="nonEncrypted">
+                                    </div>
+                                </div>
+                                
+                                <!-- 加密区间距 -->
+                                <div class="mb-4">
+                                    <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+                                        <span>加密区间距(mm)</span>
+                                        <span>平均值: <span id="wallVerticalEncryptedAvg">-</span> mm</span>
+                                    </label>
+                                    <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+                                        <input type="number" class="wall-spacing-input wall-vertical-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测1" data-type="vertical" data-area="encrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测2" data-type="vertical" data-area="encrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测3" data-type="vertical" data-area="encrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测4" data-type="vertical" data-area="encrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测5" data-type="vertical" data-area="encrypted">
+                                        <input type="number" class="wall-spacing-input wall-vertical-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测6" data-type="vertical" data-area="encrypted">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 在钢筋信息部分修改容器结构 -->
+                        <div class="mb-4 p-3 bg-gray-50 rounded-lg beam-column-rebar">
+                            <!-- 新增柱结构专用容器 -->
+                            <div id="columnMainRebarContainer" class="space-y-4 hidden">
+                                <!-- B面主筋容器 -->
+                                <div class="b-face-rebar">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <h4 class="mobile-text-base font-medium text-gray-700">B面主筋</h4>
+                                        <button class="add-b-face-btn px-3 py-2 text-sm text-primary border border-primary/30 rounded-lg">
+                                            <i class="fa-solid fa-plus-circle mr-1"></i>添加主筋组
+                                        </button>
+                                    </div>
+                                    <div id="bFaceMainRebarContainer" class="space-y-3"></div>
+                                </div>
+
+                                <!-- H面主筋容器 -->
+                                <div class="h-face-rebar mt-6">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <h4 class="mobile-text-base font-medium text-gray-700">H面主筋</h4>
+                                        <button class="add-h-face-btn px-3 py-2 text-sm text-primary border border-primary/30 rounded-lg">
+                                            <i class="fa-solid fa-plus-circle mr-1"></i>添加主筋组
+                                        </button>
+                                    </div>
+                                    <div id="hFaceMainRebarContainer" class="space-y-3"></div>
+                                </div>
+                            </div>
+
+                            <!-- 原有梁结构容器 -->
+                            <div id="beamMainRebarContainer">
+                                <div id="mainRebarContainer"></div>
+                                <div class="mt-3 flex justify-end">
+                                    <button id="addMainRebarBtn" class="px-4 py-2 text-base text-primary border border-primary/30 rounded-lg hover:bg-primary/5">
+                                        <i class="fa-solid fa-plus-circle mr-1 text-xs"></i> 添加主筋
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="p-3 bg-gray-50 rounded-lg beam-column-rebar">
+                            <!-- 箍筋信息 -->
+                            <div class="p-3 bg-gray-50 rounded-lg">
+                                <h4 class="mobile-text-base font-medium text-gray-700 mb-3">箍筋</h4>
+                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">钢筋等级</label>
+                                        <select id="stirrupGrade" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base">
+                                            <option value="">请选择</option>
+                                            <option value="HPB300">HPB300</option>
+                                            <option value="HRB335">HRB335</option>
+                                            <option value="HRB400">HRB400</option>
+                                            <option value="HRB500">HRB500</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">钢筋直径(mm)</label>
+                                        <input type="number" id="stirrupDiameter" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="直径">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-500 mb-1">箍筋肢数</label>
+                                        <input type="number" id="stirrupLegs" class="w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="肢数">
+                                    </div>
+                                    <div class="col-span-1 sm:col-span-3">
+                                    <div id="stirrupSpacingContainer">
+                                    </div>
+                                        <!-- 这里会动态生成间距输入框 -->
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 混凝土保护层厚度 -->
+                    <div class="mb-6">
+                        <h3 class="mobile-text-base font-medium text-gray-700 mb-3 flex items-center">
+                            <i class="fa-solid fa-ruler-combined text-secondary mr-2"></i>混凝土保护层厚度 (mm)
+                        </h3>
+                        <div id="coverThicknessContainer" class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                            <!-- 修复后的6组保护层厚度数据 -->
+                            <div class="cover-group bg-gray-50 p-2 rounded-lg">
+                                <div class="text-center text-xs text-gray-500 mb-1">测区 1</div>
+                                <div class="grid grid-cols-3 gap-1">
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点1" data-group="1">
+                                    </div>
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点2" data-group="1">
+                                    </div>
+                                    <div class="flex items-center justify-center">
+                                        <span class="text-xs text-gray-600">均:</span>
+                                        <span class="cover-avg text-xs font-medium ml-1" data-group="1">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- 重复上面的结构5次，修改group值从2到6 -->
+                            <div class="cover-group bg-gray-50 p-2 rounded-lg">
+                                <div class="text-center text-xs text-gray-500 mb-1">测区 2</div>
+                                <div class="grid grid-cols-3 gap-1">
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点1" data-group="2">
+                                    </div>
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点2" data-group="2">
+                                    </div>
+                                    <div class="flex items-center justify-center">
+                                        <span class="text-xs text-gray-600">均:</span>
+                                        <span class="cover-avg text-xs font-medium ml-1" data-group="2">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="cover-group bg-gray-50 p-2 rounded-lg">
+                                <div class="text-center text-xs text-gray-500 mb-1">测区 3</div>
+                                <div class="grid grid-cols-3 gap-1">
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点1" data-group="3">
+                                    </div>
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点2" data-group="3">
+                                    </div>
+                                    <div class="flex items-center justify-center">
+                                        <span class="text-xs text-gray-600">均:</span>
+                                        <span class="cover-avg text-xs font-medium ml-1" data-group="3">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="cover-group bg-gray-50 p-2 rounded-lg">
+                                <div class="text-center text-xs text-gray-500 mb-1">测区 4</div>
+                                <div class="grid grid-cols-3 gap-1">
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点1" data-group="4">
+                                    </div>
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点2" data-group="4">
+                                    </div>
+                                    <div class="flex items-center justify-center">
+                                        <span class="text-xs text-gray-600">均:</span>
+                                        <span class="cover-avg text-xs font-medium ml-1" data-group="4">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="cover-group bg-gray-50 p-2 rounded-lg">
+                                <div class="text-center text-xs text-gray-500 mb-1">测区 5</div>
+                                <div class="grid grid-cols-3 gap-1">
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点1" data-group="5">
+                                    </div>
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点2" data-group="5">
+                                    </div>
+                                    <div class="flex items-center justify-center">
+                                        <span class="text-xs text-gray-600">均:</span>
+                                        <span class="cover-avg text-xs font-medium ml-1" data-group="5">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="cover-group bg-gray-50 p-2 rounded-lg">
+                                <div class="text-center text-xs text-gray-500 mb-1">测区 6</div>
+                                <div class="grid grid-cols-3 gap-1">
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点1" data-group="6">
+                                    </div>
+                                    <div>
+                                        <input type="number" class="cover-point w-full px-1 py-1 rounded border border-gray-300 text-center text-sm" placeholder="点2" data-group="6">
+                                    </div>
+                                    <div class="flex items-center justify-center">
+                                        <span class="text-xs text-gray-600">均:</span>
+                                        <span class="cover-avg text-xs font-medium ml-1" data-group="6">-</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 操作按钮 -->
+                    <div class="flex flex-col sm:flex-row justify-between mt-6 gap-3">
+                        <button id="resetBtn" class="px-6 py-4 bg-white border border-gray-300 rounded-lg text-neutral font-medium hover:bg-gray-50 transition-colors">
+                            <i class="fa-solid fa-refresh mr-2"></i>重置
+                        </button>
+                        <button id="saveBtn" class="px-6 py-4 bg-primary text-white rounded-lg font-medium hover:bg-primary/90 transition-colors">
+                            <i class="fa-solid fa-save mr-2"></i>保存记录
+                        </button>
+                    </div>
+                </div>
+            </section>
+        </div>
+        
+        <!-- 混凝土回弹数据视图 -->
+        <div id="reboundView" style="display:none;">
+            
+            <section class="mb-8 animate-slide-up">
+                <div class="bg-white rounded-xl p-6 card-shadow">
+                    <h2 class="mobile-text-lg font-semibold text-neutral mb-4 flex items-center">
+                        <i class="fa-solid fa-strikethrough text-primary mr-2"></i>混凝土回弹检测数据
+                    </h2>
+                    <!-- 新增的工程部件和测试条件 -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <!-- 工程部件 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">工程部件</label>
+                    <input type="text" id="componentPart" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all" placeholder="请输入工程部件名称">
+                </div>
+                <!-- 测试面 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">测试面</label>
+                    <select id="testSurface" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all">
+                        <option value="">请选择</option>
+                        <option value="侧面">侧面</option>
+                        <option value="上表面">上表面</option>
+                    </select>
+                </div>
+                <!-- 面状态 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">面状态</label>
+                    <select id="surfaceCondition" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all">
+                        <option value="">请选择</option>
+                        <option value="风干">风干</option>
+                        <option value="潮湿">潮湿</option>
+                    </select>
+                </div>
+                <!-- 测试角度 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">测试角度</label>
+                    <select id="testAngle" class="w-full px-4 py-3 rounded-lg border border-gray-300 input-focus transition-all">
+                        <option value="">请选择</option>
+                        <option value="水平">水平</option>
+                        <option value="向下">向下</option>
+                        <option value="向上">向上</option>
+                    </select>
+                </div>
+            </div>
+                    
+                    <!-- 回弹检测数据 -->
+                <div class="mb-6">
+                    <div id="reboundGroupsContainer"></div>
+                    <div class="mt-3 flex justify-between">
+                        <button id="addReboundGroupBtn" class="px-4 py-3 text-base text-primary border border-primary/30 rounded-lg hover:bg-primary/5 transition-colors flex items-center">
+                            <i class="fa-solid fa-plus-circle mr-1"></i> 添加检测组
+                        </button>
+                    </div>
+                </div>
+                                                   
+                    <!-- 操作按钮 -->
+                    <div class="flex flex-col sm:flex-row justify-between mt-6 gap-3">
+                        <button id="resetBtnRebound" class="px-6 py-4 bg-white border border-gray-300 rounded-lg text-neutral font-medium hover:bg-gray-50 transition-colors">
+                            <i class="fa-solid fa-refresh mr-2"></i>重置
+                        </button>
+                        <button id="saveBtnRebound" class="px-6 py-4 bg-primary text-white rounded-lg font-medium hover:bg-primary/90 transition-colors">
+                            <i class="fa-solid fa-save mr-2"></i>保存记录
+                        </button>
+                    </div>
+                </div>
+            </section>
+        </div>
+        
+        <!-- 历史记录视图 -->
+        <div id="historyView" style="display:none;">
+            <section class="mb-8 animate-fade-in">
+                <div class="bg-white rounded-xl p-6 card-shadow">
+                    <div class="flex flex-col sm:flex-row justify-between items-center mb-4 gap-3">
+                        <h2 class="mobile-text-lg font-semibold text-neutral flex items-center">
+                            <i class="fa-solid fa-history text-primary mr-2"></i>历史记录
+                        </h2>
+                        <div class="flex items-center gap-3">
+                            <button 
+                                id="exportHistoryBtn" 
+                                class="px-4 py-3 bg-primary text-white rounded-lg text-base font-medium hover:bg-primary/90 transition-colors flex items-center"
+                                onclick="exportToExcel()"
+                            >
+                                <i class="fa-solid fa-file-excel mr-2"></i>导出Excel
+                            </button>
+                            <button id="clearRecordsBtn" class="text-base text-danger hover:text-danger/80 transition-colors flex items-center">
+                                <i class="fa-solid fa-trash-alt mr-1"></i>清空记录
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div id="recordsList" class="space-y-3">
+                        <!-- 历史记录会动态生成 -->
+                        <div class="animate-fade-in text-center text-gray-500 py-8">
+                            <i class="fa-solid fa-clipboard-list text-4xl mb-3 text-gray-300"></i>
+                            <p class="text-base">暂无检测记录</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+    
+    <!-- 底部导航 -->
+    <footer class="sticky bottom-0 z-40 bg-white border-t border-gray-200">
+        <div class="container mx-auto px-4">
+            <div class="flex justify-around py-2">
+                <button id="rebarDataBtn" class="flex flex-col items-center justify-center text-primary p-2 w-full">
+                    <i class="fa-solid fa-home text-xl mb-1"></i>
+                    <span class="text-xs">钢筋数据</span>
+                </button>
+                <button id="reboundDataBtn" class="flex flex-col items-center justify-center text-gray-400 p-2 w-full">
+                    <i class="fa-solid fa-strikethrough text-xl mb-1"></i>
+                    <span class="text-xs">混凝土回弹</span>
+                </button>
+                <button id="historyDataBtn" class="flex flex-col items-center justify-center text-gray-400 p-2 w-full">
+                    <i class="fa-solid fa-history text-xl mb-1"></i>
+                    <span class="text-xs">历史记录</span>
+                </button>
+                <button class="flex flex-col items-center justify-center text-gray-400 hover:text-primary transition-colors p-2 w-full">
+                    <i class="fa-solid fa-cog text-xl mb-1"></i>
+                    <span class="text-xs">设置</span>
+                </button>
+            </div>
+        </div>
+    </footer>
+    
+    <!-- 保存成功提示 -->
+    <div id="successToast" class="fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-secondary text-white px-6 py-3 rounded-lg shadow-lg z-50 opacity-0 transition-opacity duration-300 flex items-center">
+        <i class="fa-solid fa-check-circle mr-2"></i>
+        <span>保存成功</span>
+    </div>
+
+    <!-- 查看记录详情模态框 -->
+    <div id="recordDetailModal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center opacity-0 pointer-events-none transition-opacity p-4">
+        <div class="modal-content bg-white rounded-xl p-4 md:p-6 w-full max-w-[95%] max-h-[90vh] overflow-y-auto transform scale-95 transition-transform">
+            <h3 class="mobile-text-lg font-semibold text-neutral mb-4">检测记录详情</h3>
+            <div id="recordDetailContent" class="text-sm text-gray-700 space-y-2"></div>
+            <div class="mt-6 text-right pt-4 border-t border-gray-100">
+                <button id="closeModalBtn" class="px-5 py-3 bg-gray-200 rounded-lg text-base font-medium hover:bg-gray-300">关闭</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // 全局变量
+        let currentStructureType = 'beam';
+        let currentRecordId = null;
+        let reboundGroups = 1;
+        let reboundPointsPerGroup = 16;
+        let coverThicknessDataCount = 6;
+        let carbonizationGroups = 1;
+
+        // DOM 加载完成后执行
+        document.addEventListener('DOMContentLoaded', function() {
+            // 初始化回弹数据输入框
+            initializeReboundGroups();
+            // 初始化保护层厚度输入框
+            initializeCoverThicknessInputs();
+            // 初始化事件监听
+            initializeEventListeners();
+            // 初始化板结构间距输入框事件
+            initializeSlabSpacingInputs();
+            // 初始化墙结构间距输入框事件
+            initializeWallSpacingInputs();
+        });
+        
+        document.getElementById('closeModalBtn').addEventListener('click', () => {
+            const modal = document.getElementById('recordDetailModal');
+            modal.classList.remove('opacity-100', 'pointer-events-auto');
+            modal.querySelector('.modal-content').classList.remove('scale-100');
+        });
+
+        // 绑定重置按钮事件
+        const resetBtn = document.getElementById('resetBtn');
+        const resetBtnRebound = document.getElementById('resetBtnRebound');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', resetAllInputs);
+        }
+        if (resetBtnRebound) {
+            resetBtnRebound.addEventListener('click', resetAllInputs);
+        }
+        
+        // 初始化板结构钢筋间距输入框事件
+        function initializeSlabSpacingInputs() {
+            document.querySelectorAll('.slab-spacing-input').forEach(input => {
+                input.addEventListener('input', function() {
+                    calculateSlabSpacingAvg();
+                    // 同时计算墙的间距
+                    calculateWallSpacingAvg();
+                });
+            });
+        }
+        
+        // 初始化墙结构钢筋间距输入框事件
+        function initializeWallSpacingInputs() {
+            document.querySelectorAll('.wall-spacing-input').forEach(input => {
+                input.addEventListener('input', calculateWallSpacingAvg);
+            });
+        }
+        
+        // 计算板结构钢筋间距平均值
+        function calculateSlabSpacingAvg() {
+    // 数字轴非加密区平均值
+    const digitalAxisNonEncryptedAvgEl = document.getElementById('digitalAxisNonEncryptedAvg');
+    if (digitalAxisNonEncryptedAvgEl) {
+        const inputs = document.querySelectorAll('.slab-spacing-input.slab-digital-non-encrypted');
+        let sum = 0;
+        let count = 0;
+        inputs.forEach(input => {
+            const value = parseFloat(input.value);
+            if (!isNaN(value)) {
+                sum += value;
+                count++;
+            }
+        });
+        const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+        digitalAxisNonEncryptedAvgEl.textContent = avg;
+    }
+
+    // 数字轴加密区平均值
+    const digitalAxisEncryptedAvgEl = document.getElementById('digitalAxisEncryptedAvg');
+    if (digitalAxisEncryptedAvgEl) {
+        const inputs = document.querySelectorAll('.slab-spacing-input.slab-digital-encrypted');
+        let sum = 0;
+        let count = 0;
+        inputs.forEach(input => {
+            const value = parseFloat(input.value);
+            if (!isNaN(value)) {
+                sum += value;
+                count++;
+            }
+        });
+        const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+        digitalAxisEncryptedAvgEl.textContent = avg;
+    }
+
+    // 字母轴非加密区平均值
+    const letterAxisNonEncryptedAvgEl = document.getElementById('letterAxisNonEncryptedAvg');
+    if (letterAxisNonEncryptedAvgEl) {
+        const inputs = document.querySelectorAll('.slab-spacing-input.slab-letter-non-encrypted');
+        let sum = 0;
+        let count = 0;
+        inputs.forEach(input => {
+            const value = parseFloat(input.value);
+            if (!isNaN(value)) {
+                sum += value;
+                count++;
+            }
+        });
+        const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+        letterAxisNonEncryptedAvgEl.textContent = avg;
+    }
+
+    // 字母轴加密区平均值
+    const letterAxisEncryptedAvgEl = document.getElementById('letterAxisEncryptedAvg');
+    if (letterAxisEncryptedAvgEl) {
+        const inputs = document.querySelectorAll('.slab-spacing-input.slab-letter-encrypted');
+        let sum = 0;
+        let count = 0;
+        inputs.forEach(input => {
+            const value = parseFloat(input.value);
+            if (!isNaN(value)) {
+                sum += value;
+                count++;
+            }
+        });
+        const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+        letterAxisEncryptedAvgEl.textContent = avg;
+    }
+}
+        
+        // 计算墙结构钢筋间距平均值
+        function calculateWallSpacingAvg() {
+    // 横筋非加密区平均值
+    const wallHorizontalNonEncryptedAvgEl = document.getElementById('wallHorizontalNonEncryptedAvg');
+    if (wallHorizontalNonEncryptedAvgEl) {
+        const horizontalInputs = document.querySelectorAll('.wall-spacing-input[data-type="horizontal"][data-area="nonEncrypted"]');
+        let sum = 0;
+        let count = 0;
+        horizontalInputs.forEach(input => {
+            const value = parseFloat(input.value);
+            if (!isNaN(value)) {
+                sum += value;
+                count++;
+            }
+        });
+        const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+        wallHorizontalNonEncryptedAvgEl.textContent = avg;
+    }
+
+    // 横筋加密区平均值
+    const wallHorizontalEncryptedAvgEl = document.getElementById('wallHorizontalEncryptedAvg');
+    if (wallHorizontalEncryptedAvgEl) {
+        const horizontalInputs = document.querySelectorAll('.wall-spacing-input[data-type="horizontal"][data-area="encrypted"]');
+        let sum = 0;
+        let count = 0;
+        horizontalInputs.forEach(input => {
+            const value = parseFloat(input.value);
+            if (!isNaN(value)) {
+                sum += value;
+                count++;
+            }
+        });
+        const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+        wallHorizontalEncryptedAvgEl.textContent = avg;
+    }
+
+    // 纵筋非加密区平均值
+    const wallVerticalNonEncryptedAvgEl = document.getElementById('wallVerticalNonEncryptedAvg');
+    if (wallVerticalNonEncryptedAvgEl) {
+        const verticalInputs = document.querySelectorAll('.wall-spacing-input[data-type="vertical"][data-area="nonEncrypted"]');
+        let sum = 0;
+        let count = 0;
+        verticalInputs.forEach(input => {
+            const value = parseFloat(input.value);
+            if (!isNaN(value)) {
+                sum += value;
+                count++;
+            }
+        });
+        const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+        wallVerticalNonEncryptedAvgEl.textContent = avg;
+    }
+
+    // 纵筋加密区平均值
+    const wallVerticalEncryptedAvgEl = document.getElementById('wallVerticalEncryptedAvg');
+    if (wallVerticalEncryptedAvgEl) {
+        const verticalInputs = document.querySelectorAll('.wall-spacing-input[data-type="vertical"][data-area="encrypted"]');
+        let sum = 0;
+        let count = 0;
+        verticalInputs.forEach(input => {
+            const value = parseFloat(input.value);
+            if (!isNaN(value)) {
+                sum += value;
+                count++;
+            }
+        });
+        const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+        wallVerticalEncryptedAvgEl.textContent = avg;
+    }
+}
+        
+function updateCarbonizationGroupNumbers() {
+    const groups = document.querySelectorAll('.carbonization-group');
+    groups.forEach((group, index) => {
+        const newGroupNumber = index + 1;
+        
+        // 更新标题
+        const title = group.querySelector('h4');
+        if (title) {
+            title.innerHTML = `测区 ${newGroupNumber}   平均值: <span class="group-carbonization-avg" data-group="${newGroupNumber}">-</span> mm`;
+        }
+        
+        // 更新删除按钮的data-group
+        const removeBtn = group.querySelector('.remove-carbonization-btn');
+        if (removeBtn) {
+            removeBtn.dataset.group = newGroupNumber;
+        }
+        
+        // 更新输入框的data-group
+        const inputs = group.querySelectorAll('.carbonization-point');
+        inputs.forEach(input => {
+            input.dataset.group = newGroupNumber;
+        });
+        
+        // 重新计算平均值（因为组号变了）
+        calculateGroupCarbonizationAvg(newGroupNumber);
+    });
+}
+        
+        // 计算碳化深度组平均值
+        function calculateGroupCarbonizationAvg(group) {
+            const inputs = document.querySelectorAll(`.carbonization-points-container[data-group="${group}"] input`);
+            let sum = 0;
+            let count = 0;
+            
+            inputs.forEach(input => {
+                const value = parseFloat(input.value);
+                if (!isNaN(value)) {
+                    sum += value;
+                    count++;
+                }
+            });
+            
+            const average = count > 0 ? (sum / count).toFixed(1) : '-';
+            document.querySelector(`.group-carbonization-avg[data-group="${group}"]`).textContent = average;
+        }
+        
+        
+        //初始化箍筋间距输入框
+        function initializeStirrupSpacingInputs() {
+            const stirrupContainer = document.getElementById('stirrupSpacingContainer');
+            if (!stirrupContainer) return;
+
+            stirrupContainer.innerHTML = `
+                <div class="mb-4">
+                    <!-- 非加密区 - 添加flex布局 -->
+                    <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+                        <span>非加密区间距(mm)</span>
+                        <span>平均值: <span id="stirrupNonEncryptedAvg">-</span> mm</span>
+                    </label>
+                    <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+                        ${Array.from({length: 6}, (_, i) => `
+                            <input type="number" class="stirrup-spacing-input stirrup-non-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测${i+1}">
+                        `).join('')}
+                    </div>
+                </div>
+                
+                <div class="mb-4">
+                    <!-- 加密区 - 添加flex布局 -->
+                    <label class="block text-sm font-medium text-gray-500 mb-1" style="display: flex; justify-content: space-between;">
+                        <span>加密区间距(mm)</span>
+                        <span>平均值: <span id="stirrupEncryptedAvg">-</span> mm</span>
+                    </label>
+                    <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-1">
+                        ${Array.from({length: 6}, (_, i) => `
+                            <input type="number" class="stirrup-spacing-input stirrup-encrypted w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base text-center" placeholder="测${i+1}">
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        }
+
+        function calculateStirrupSpacingAvg() {
+            // 计算非加密区平均值
+            const nonEncryptedInputs = document.querySelectorAll('.stirrup-non-encrypted');
+            let nonEncryptedSum = 0;
+            let nonEncryptedCount = 0;
+            
+            nonEncryptedInputs.forEach(input => {
+                const value = parseFloat(input.value);
+                if (!isNaN(value)) {
+                    nonEncryptedSum += value;
+                    nonEncryptedCount++;
+                }
+            });
+            const nonEncryptedAvg = nonEncryptedCount > 0 ? (nonEncryptedSum / nonEncryptedCount).toFixed(1) : '-';
+            document.getElementById('stirrupNonEncryptedAvg').textContent = nonEncryptedAvg;
+            
+            // 计算加密区平均值
+            const encryptedInputs = document.querySelectorAll('.stirrup-encrypted');
+            let encryptedSum = 0;
+            let encryptedCount = 0;
+            
+            encryptedInputs.forEach(input => {
+                const value = parseFloat(input.value);
+                if (!isNaN(value)) {
+                    encryptedSum += value;
+                    encryptedCount++;
+                }
+            });
+            
+            const encryptedAvg = encryptedCount > 0 ? (encryptedSum / encryptedCount).toFixed(1) : '-';
+            document.getElementById('stirrupEncryptedAvg').textContent = encryptedAvg;
+        }
+
+        function initMainRebarGroups() {
+            const structureType = document.getElementById('currentStructureType').textContent.trim();
+            const beamContainer = document.getElementById('beamMainRebarContainer');
+            const columnContainer = document.getElementById('columnMainRebarContainer');
+
+            if (structureType === '柱') {
+                beamContainer.style.display = 'none';
+                columnContainer.style.display = 'block';
+                // 新增：清空原有内容
+                document.getElementById('bFaceMainRebarContainer').innerHTML = '';
+                document.getElementById('hFaceMainRebarContainer').innerHTML = '';
+                addMainRebarGroup('bFace');
+                addMainRebarGroup('hFace');
+            } else {
+                beamContainer.style.display = 'block';
+                columnContainer.style.display = 'none';
+                document.getElementById('mainRebarContainer').innerHTML = '';
+                addMainRebarGroup('beam');
+            }
+        }
+
+        // 添加主筋组的函数
+        function addMainRebarGroup(faceType) {
+            const containerMap = {
+                'bFace': document.getElementById('bFaceMainRebarContainer'),
+                'hFace': document.getElementById('hFaceMainRebarContainer'),
+                'beam': document.getElementById('mainRebarContainer')
+            };
+
+            const container = containerMap[faceType];
+            if (!container) return;
+
+            const groupCount = container.querySelectorAll('.main-rebar-group').length + 1;
+            const isColumn = faceType.includes('Face');
+            
+            const groupHtml = `
+                <div class="main-rebar-group p-3 bg-white rounded border border-gray-200">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="text-sm font-medium text-gray-600">主筋组 ${groupCount}</span>
+                        ${groupCount > 1 ? `
+                        <button class="remove-rebar-btn text-red-500 hover:text-red-600 text-sm">
+                            <i class="fa-solid fa-trash-can"></i> 移除
+                        </button>` : ''}
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                            <label class="text-sm text-gray-500">钢筋类型</label>
+                            <input type="text" value="${isColumn ? '柱纵向钢筋' : '梁跨中底部纵筋'}" 
+                            placeholder="请输入钢筋类型" 
+                                   class="w-full px-3 py-2 text-base border rounded">
+                        </div>
+                        <div>
+                            <label class="text-sm text-gray-500">钢筋数量</label>
+                            <input type="number" 
+                            placeholder="数量"
+                            class="w-full px-3 py-2 text-base border rounded">
+                            
+                        </div>
+                        <div>
+                            <label class="text-sm text-gray-500">钢筋等级</label>
+                            <select class="w-full px-3 py-2 text-base border rounded">
+                                ${['','HPB300','HRB335','HRB400','HRB500'].map(o => 
+                                  `<option value="${o}">${o || '请选择'}</option>`)}
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-sm text-gray-500">钢筋直径(mm)</label>
+                            <input type="number" 
+                            placeholder="直径" 
+                            class="w-full px-3 py-2 text-base border rounded">
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            container.insertAdjacentHTML('beforeend', groupHtml);
+
+            // 绑定移除按钮事件
+            container.lastElementChild.querySelectorAll('.remove-rebar-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+    const groupElement = e.target.closest('.main-rebar-group');
+    const container = groupElement.parentNode;
+    groupElement.remove();
+    updateContainerRebarNumbers(container); // 使用已定义的函数
+});
+            });
+        }
+
+        document.querySelector('.add-b-face-btn')?.addEventListener('click', () => addMainRebarGroup('bFace'));
+        document.querySelector('.add-h-face-btn')?.addEventListener('click', () => addMainRebarGroup('hFace'));
+        document.getElementById('addMainRebarBtn')?.addEventListener('click', () => addMainRebarGroup('beam'));
+
+        // 添加回弹检测组的函数
+        function addReboundGroup() {
+            const container = document.getElementById('reboundGroupsContainer');
+            if(!container) return;
+            
+            const groupCount = container.querySelectorAll('.rebound-group-wrapper').length + 1;
+            
+            const groupHtml = `
+            <div class="rebound-group-wrapper mb-6 p-4 bg-gray-50 rounded-lg">
+                <div class="flex justify-between items-center mb-3 rebound-group-header">
+                    <h4 class="text-sm font-medium text-gray-700 flex items-center">
+                        第${groupCount}组检测数据
+                    </h4>
+                    <button class="remove-rebound-btn text-sm text-danger hover:text-danger/80 transition-colors" data-group="${groupCount}">
+                        <i class="fa-solid fa-trash-alt"></i> 删除组
+                    </button>
+                </div>
+                
+                <!-- 回弹数据部分 -->
+                <div class="mb-4">
+                    <h5 class="text-sm font-medium text-gray-600 mb-2 flex items-center">
+                        <i class="fa-solid fa-strikethrough mr-1"></i> 回弹数据 
+                        <span class="ml-3 text-sm text-gray-500">
+                            平均值: <span class="group-rebound-avg" data-group="${groupCount}">-</span> MPa
+                        </span>
+                    </h5>
+                    <div class="grid grid-cols-4 sm:grid-cols-8 gap-2 rebound-points-container" data-group="${groupCount}">
+                        <!-- 回弹点将通过JS动态添加 -->
+                    </div>
+                </div>
+                
+                <!-- 碳化深度部分 -->
+                <div class="mt-4">
+                    <h5 class="text-sm font-medium text-gray-600 mb-2 flex items-center">
+                        <i class="fa-solid fa-ruler mr-1"></i> 碳化深度
+                        <span class="ml-3 text-sm text-gray-500">
+                            平均值: <span class="group-carbonization-avg" data-group="${groupCount}">-</span> mm
+                        </span>
+                    </h5>
+                    <div class="grid grid-cols-3 gap-3 carbonization-points-container" data-group="${groupCount}">
+                        <!-- 碳化深度点将通过JS动态添加 -->
+                    </div>
+                </div>
+            </div>
+            `;
+            
+            container.insertAdjacentHTML('beforeend', groupHtml);
+            
+            // 初始化该组的回弹数据输入框
+            initializeReboundPointsForGroup(groupCount);
+            // 初始化该组的碳化深度输入框
+            initializeCarbonizationPointsForGroup(groupCount);
+
+            // 绑定移除按钮事件
+            container.querySelectorAll('.remove-rebound-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const wrapper = e.target.closest('.rebound-group-wrapper');
+                    if(wrapper) wrapper.remove();
+                    updateReboundGroupNumbers(); // 更新组号显示
+                });
+            });
+        }
+
+        function updateReboundGroupNumbers() {
+    const groups = document.querySelectorAll('.rebound-group-wrapper');
+    groups.forEach((group, index) => {
+        const header = group.querySelector('.rebound-group-header h4');
+        if (header) {
+            header.innerHTML = `第${index + 1}组回弹数据 
+                <span class="ml-3 text-sm text-gray-500">
+                    
+                </span>`;
+        }
+        
+        // 更新数据组属性
+        const container = group.querySelector('.rebound-points-container');
+        if (container) container.dataset.group = index + 1;
+        
+        // 更新删除按钮属性
+        const removeBtn = group.querySelector('.remove-rebound-btn');
+        if (removeBtn) removeBtn.dataset.group = index + 1;
+    });
+}
+        function showSuccessToast(message = '保存成功') {
+            const toast = document.getElementById('successToast');
+            toast.querySelector('span').textContent = message;
+            toast.classList.add('opacity-100');
+            setTimeout(() => toast.classList.remove('opacity-100'), 2000);
+        }
+        function initializeCarbonizationPointsForGroup(group) {
+            const container = document.querySelector(`.carbonization-points-container[data-group="${group}"]`);
+            container.innerHTML = '';
+            
+            for (let point = 1; point <= 3; point++) {
+                const input = document.createElement('input');
+                input.type = 'number';
+                input.id = `carbonization_g${group}_p${point}`;
+                input.placeholder = `测点${point}`;
+                input.className = 'w-full px-3 py-2 rounded-lg border border-gray-300 input-focus transition-all text-base';
+                input.addEventListener('input', function() {
+                    calculateGroupCarbonizationAvg(group);
+                });
+                container.appendChild(input);
+            }
+            
+            // 计算并更新该组平均值
+            calculateGroupCarbonizationAvg(group);
+        }
+        // 添加历史记录渲染函数
+        function renderHistoryRecords() {
+            const records = getHistoryRecords();
+            const recordsList = document.getElementById('recordsList');
+            if (!recordsList) return;
+        
+            if (records.length === 0) {
+                recordsList.innerHTML = `
+                    <div class="animate-fade-in text-center text-gray-500 py-8">
+                        <i class="fa-solid fa-clipboard-list text-4xl mb-3 text-gray-300"></i>
+                        <p class="text-base">暂无检测记录</p>
+                    </div>
+                `;
+                return;
+            }
+        
+            // 更新列表项模板 - 新记录已经在数组开头
+            // 更新列表项模板 - 新记录已经在数组开头
+            recordsList.innerHTML = records.map(record => {
+                // 根据记录类型显示不同的信息
+                const recordType = record.recordType || 'rebar'; // 默认为钢筋数据
+                const isRebound = recordType === 'rebound';
+                
+                // 根据记录类型显示不同的图标和标题
+                const icon = isRebound ? 'fa-strikethrough' : 'fa-link';
+                const title = isRebound ? '混凝土回弹' : '钢筋数据';
+                
+                // 根据记录类型显示不同的信息字段
+                const infoFields = isRebound ? `
+                    <p>工程部件：${record.componentPart || '未填写'}</p>
+                    <p>测试面：${record.testSurface || '未填写'}</p>
+                ` : `
+                    <p>结构类型：${record.structureType || '未填写'}</p>
+                    <p>检测部位：${record.inspectionLocation || '未填写'}</p>
+                `;
+                
+                return `
+                <div class="p-4 bg-white rounded-lg shadow-sm history-card animate-fade-in" data-record-id="${record.id}">
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+                        <div class="flex-1">
+                            <div class="flex items-center gap-2 mb-1">
+                                <i class="fa-solid ${icon} text-primary"></i>
+                                <h4 class="text-base font-medium text-neutral">${record.projectName}</h4>
+                                <span class="px-2 py-1 bg-primary/10 text-primary text-xs rounded">
+                                    ${title}
+                                </span>
+                            </div>
+                            <div class="text-sm text-gray-500 space-y-1 mt-1">
+                                ${infoFields}
+                                <p>${new Date(record.timestamp).toLocaleString()}</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3 mt-2 sm:mt-0">
+                            <button class="view-record-btn px-3 py-2 bg-primary/10 text-primary text-sm rounded-lg hover:bg-primary/20" data-record-id="${record.id}">
+                                查看详情
+                            </button>
+                            <button class="delete-record-btn px-3 py-2 bg-red-100 text-red-600 text-sm rounded-lg hover:bg-red-200" data-record-id="${record.id}">
+                                删除
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                `;
+            }).join('');
+        
+            // 绑定查看详情按钮事件
+            document.querySelectorAll('.view-record-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const recordId = e.currentTarget.dataset.recordId;
+                    const record = getHistoryRecords().find(r => r.id === recordId);
+                    showRecordDetail(record);
+                });
+            });
+        
+            // 新增删除按钮事件绑定
+            document.querySelectorAll('.delete-record-btn').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const recordId = e.currentTarget.dataset.recordId;
+                    
+                    // 添加确认对话框
+                    const isConfirm = await showConfirmDialog(
+                        '确认删除',
+                        '确定要删除这条检测记录吗？此操作不可恢复！',
+                        '删除',
+                        '取消'
+                    );
+                    
+                    if (isConfirm) {
+                        deleteHistoryRecord(recordId);
+                        renderHistoryRecords(); // 重新渲染列表
+                    }
+                });
+            });
+        }
+        function updateContainerRebarNumbers(container) {
+    const groups = container.querySelectorAll('.main-rebar-group');
+    groups.forEach((group, index) => {
+        // 更新标题
+        const titleSpan = group.querySelector('.text-sm.font-medium.text-gray-600');
+        if (titleSpan) {
+            titleSpan.textContent = `主筋组 ${index + 1}`;
+        }
+        
+        // 更新移除按钮：第一组不显示移除按钮
+        const removeBtn = group.querySelector('.remove-rebar-btn');
+        if (removeBtn) {
+            removeBtn.style.display = index === 0 ? 'none' : 'block';
+        }
+    });
+}
+        // 新增删除记录函数
+        function deleteHistoryRecord(recordId) {
+            let records = getHistoryRecords();
+            records = records.filter(record => record.id !== recordId);
+            localStorage.setItem('inspectionRecords', JSON.stringify(records));
+        }
+        
+        // 新增确认对话框函数
+        async function showConfirmDialog(title, message, confirmText, cancelText) {
+            return new Promise((resolve) => {
+                // 这里可以使用您项目中的模态框组件
+                // 以下是示例实现，需要根据实际UI框架调整
+                const dialog = document.createElement('div');
+                dialog.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
+                dialog.innerHTML = `
+                    <div class="bg-white p-6 rounded-lg max-w-sm w-full mx-4">
+                        <h3 class="text-lg font-bold mb-2">${title}</h3>
+                        <p class="text-gray-600 mb-6">${message}</p>
+                        <div class="flex justify-end gap-3">
+                            <button class="cancel-btn px-4 py-2 text-gray-600 hover:text-gray-800">
+                                ${cancelText}
+                            </button>
+                            <button class="confirm-btn px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">
+                                ${confirmText}
+                            </button>
+                        </div>
+                    </div>
+                `;
+        
+                document.body.appendChild(dialog);
+        
+                dialog.querySelector('.confirm-btn').addEventListener('click', () => {
+                    document.body.removeChild(dialog);
+                    resolve(true);
+                });
+        
+                dialog.querySelector('.cancel-btn').addEventListener('click', () => {
+                    document.body.removeChild(dialog);
+                    resolve(false);
+                });
+            });
+        }
+
+        // 添加记录详情展示函数
+function showRecordDetail(record) {
+    const modal = document.getElementById('recordDetailModal');
+    const content = document.getElementById('recordDetailContent');
+    if (record.recordType === 'rebar'){
+    if (!modal || !content) return;
+
+    // 生成截面尺寸HTML
+    const sectionSizeHTML = Object.keys(record.sectionSize).length > 0 ? 
+        Object.entries(record.sectionSize).map(([key, value]) => 
+            `<p><strong>${key}:</strong> ${value || '未填写'} mm</p>`
+        ).join('') : 
+        '<p>无截面尺寸数据</p>';
+
+    // 生成钢筋信息HTML
+    let rebarInfoHTML = '';
+    if (record.structureType === '板') {
+        rebarInfoHTML = `
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">数字轴钢筋：</h3>
+                <p>类型：${record.rebarInfo.digitalAxis.rebarType || '未填写'}</p>
+                <p>等级：${record.rebarInfo.digitalAxis.grade || '未填写'}</p>
+                <p>直径：${record.rebarInfo.digitalAxis.diameter || '未填写'} mm</p>
+                <div class="mt-2">
+                    <h4 class="font-medium">非加密区间距：</h4>
+                    <p>${record.rebarInfo.digitalAxis.spacingNonEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>平均值：${record.rebarInfo.digitalAxis.spacingNonEncryptedAvg} mm</p>
+                </div>
+                <div class="mt-2">
+                    <h4 class="font-medium">加密区间距：</h4>
+                    <p>${record.rebarInfo.digitalAxis.spacingEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>平均值：${record.rebarInfo.digitalAxis.spacingEncryptedAvg} mm</p>
+                </div>
+            </div>
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">字母轴钢筋：</h3>
+                <p>类型：${record.rebarInfo.letterAxis.rebarType || '未填写'}</p>
+                <p>等级：${record.rebarInfo.letterAxis.grade || '未填写'}</p>
+                <p>直径：${record.rebarInfo.letterAxis.diameter || '未填写'} mm</p>
+                <div class="mt-2">
+                    <h4 class="font-medium">非加密区间距：</h4>
+                    <p>${record.rebarInfo.letterAxis.spacingNonEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>平均值：${record.rebarInfo.letterAxis.spacingNonEncryptedAvg} mm</p>
+                </div>
+                <div class="mt-2">
+                    <h4 class="font-medium">加密区间距：</h4>
+                    <p>${record.rebarInfo.letterAxis.spacingEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>平均值：${record.rebarInfo.letterAxis.spacingEncryptedAvg} mm</p>
+                </div>
+            </div>`;
+    } else if (record.structureType === '梁') {
+        rebarInfoHTML = `
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">主筋信息：</h3>
+                ${record.rebarInfo.mainRebars.map((rebar, index) => `
+                    <div class="ml-4">
+                        <h4 class="font-medium">主筋组 ${index + 1}:</h4>
+                        <p>类型：${rebar.type || '未填写'}</p>
+                        <p>数量：${rebar.count || '未填写'}</p>
+                        <p>等级：${rebar.grade || '未填写'}</p>
+                        <p>直径：${rebar.diameter || '未填写'} mm</p>
+                    </div>
+                `).join('')}
+                <div class="mt-4">
+                    <h3 class="text-lg font-semibold">箍筋信息：</h3>
+                    <p>等级：${record.rebarInfo.stirrup.grade || '未填写'}</p>
+                    <p>直径：${record.rebarInfo.stirrup.diameter || '未填写'} mm</p>
+                    <p>肢数：${record.rebarInfo.stirrup.legs || '未填写'}</p>
+                    <p>非加密区间距：${record.rebarInfo.stirrup.spacingNonEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>非加密区间距平均值：${record.rebarInfo.stirrup.spacingNonEncryptedAvg} mm</p>
+                    <p>加密区间距：${record.rebarInfo.stirrup.spacingEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>加密区间距平均值：${record.rebarInfo.stirrup.spacingEncryptedAvg} mm</p>
+                </div>
+            </div>`;
+    } else if (record.structureType === '柱') {
+        rebarInfoHTML = `
+            <div class="mt-4">
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="b-face-section">
+                        <h3 class="text-lg font-semibold">B面主筋：</h3>
+                        ${record.rebarInfo.mainRebars.bFace.map((rebar, index) => `
+                            <div class="ml-4">
+                                <h4 class="font-medium">主筋组 ${index + 1}:</h4>
+                                <p>类型：${rebar.type || '未填写'}</p>
+                                <p>数量：${rebar.count || '未填写'}</p>
+                                <p>等级：${rebar.grade || '未填写'}</p>
+                                <p>直径：${rebar.diameter || '未填写'} mm</p>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <div class="h-face-section">
+                        <h3 class="text-lg font-semibold">H面主筋：</h3>
+                        ${record.rebarInfo.mainRebars.hFace.map((rebar, index) => `
+                            <div class="ml-4">
+                                <h4 class="font-medium">主筋组 ${index + 1}:</h4>
+                                <p>类型：${rebar.type || '未填写'}</p>
+                                <p>数量：${rebar.count || '未填写'}</p>
+                                <p>等级：${rebar.grade || '未填写'}</p>
+                                <p>直径：${rebar.diameter || '未填写'} mm</p>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <h3 class="text-lg font-semibold">箍筋信息：</h3>
+                    <p>等级：${record.rebarInfo.stirrup.grade || '未填写'}</p>
+                    <p>直径：${record.rebarInfo.stirrup.diameter || '未填写'} mm</p>
+                    <p>肢数：${record.rebarInfo.stirrup.legs || '未填写'}</p>
+                    <p>非加密区间距：${record.rebarInfo.stirrup.spacingNonEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>非加密区间距平均值：${record.rebarInfo.stirrup.spacingNonEncryptedAvg} mm</p>
+                    <p>加密区间距：${record.rebarInfo.stirrup.spacingEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>加密区间距平均值：${record.rebarInfo.stirrup.spacingEncryptedAvg} mm</p>
+                </div>
+            </div>`;
+    } else if (record.structureType === '墙') {
+        rebarInfoHTML = `
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">横筋配置：</h3>
+                <p>类型：${record.rebarInfo.horizontal.rebarType || '未填写'}</p>
+                <p>等级：${record.rebarInfo.horizontal.grade || '未填写'}</p>
+                <p>直径：${record.rebarInfo.horizontal.diameter || '未填写'} mm</p>
+                <div class="mt-2">
+                    <h4 class="font-medium">非加密区间距：</h4>
+                    <p>${record.rebarInfo.horizontal.spacingNonEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>平均值：${record.rebarInfo.horizontal.spacingNonEncryptedAvg} mm</p>
+                </div>
+                <div class="mt-2">
+                    <h4 class="font-medium">加密区间距：</h4>
+                    <p>${record.rebarInfo.horizontal.spacingEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>平均值：${record.rebarInfo.horizontal.spacingEncryptedAvg} mm</p>
+                </div>
+            </div>
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">纵筋配置：</h3>
+                <p>类型：${record.rebarInfo.vertical.rebarType || '未填写'}</p>
+                <p>等级：${record.rebarInfo.vertical.grade || '未填写'}</p>
+                <p>直径：${record.rebarInfo.vertical.diameter || '未填写'} mm</p>
+                <div class="mt-2">
+                    <h4 class="font-medium">非加密区间距：</h4>
+                    <p>${record.rebarInfo.vertical.spacingNonEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>平均值：${record.rebarInfo.vertical.spacingNonEncryptedAvg} mm</p>
+                </div>
+                <div class="mt-2">
+                    <h4 class="font-medium">加密区间距：</h4>
+                    <p>${record.rebarInfo.vertical.spacingEncrypted.join(', ') || '未填写'} mm</p>
+                    <p>平均值：${record.rebarInfo.vertical.spacingEncryptedAvg} mm</p>
+                </div>
+            </div>`;
+    }
+
+
+    
+    // 保护层厚度HTML
+    let coverHTML = '';
+    if (record.coverThickness && record.coverThickness.length > 0) {
+        coverHTML = record.coverThickness.map(area => `
+            <div class="mt-2">
+                <strong>测区 ${area.group}:</strong>
+                <p>测点1: ${area.point1 || '未填写'} mm</p>
+                <p>测点2: ${area.point2 || '未填写'} mm</p>
+                <p>平均值: ${area.average || '-'} mm</p>
+            </div>
+        `).join('');
+    } else {
+        coverHTML = '<p>无保护层厚度数据</p>';
+    }
+
+    content.innerHTML = `
+        <div class="space-y-2">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <p><strong>项目名称:</strong> ${record.projectName}</p>
+                    <p><strong>检测日期:</strong> ${record.inspectionDate}</p>
+                    <p><strong>检测人员:</strong> ${record.inspector}</p>
+                </div>
+                <div>
+                    <p><strong>检测部位:</strong> ${record.inspectionLocation}</p>
+                    <p><strong>结构类型:</strong> ${record.structureType}</p>
+                    <p><strong>记录时间:</strong> ${new Date(record.timestamp).toLocaleString()}</p>
+                </div>
+            </div>
+
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">层高数据：</h3>
+                <p><strong>构件名称:</strong> ${record.heightData.componentName || '未填写'}</p>
+                <p><strong>检测部位:</strong> ${record.heightData.location || '未填写'}</p>
+                <p><strong>层高:</strong> ${record.heightData.height ? record.heightData.height + ' mm' : '未填写'}</p>
+            </div>
+
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">截面尺寸：</h3>
+                ${sectionSizeHTML}
+            </div>
+
+            <div class="mt-4">
+                ${rebarInfoHTML}
+            </div>
+
+            <div class="mt-4">
+                <h3 class="text-lg font-semibold">保护层厚度：</h3>
+                ${coverHTML}
+            </div>
+            <div class="mt-4">
+                <p><strong>备注:</strong> ${record.remarks || '无备注信息'}</p>
+            </div>
+        </div>
+    `;
+} else if (record.recordType === 'rebound') {
+                // 混凝土回弹数据详情页 - 新样式
+                content.innerHTML = `
+                    <div class="space-y-4">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                                <p><strong>项目名称:</strong> ${record.projectName}</p>
+                                <p><strong>检测日期:</strong> ${record.inspectionDate}</p>
+                                <p><strong>检测人员:</strong> ${record.inspector}</p>
+                            </div>
+                            <div>
+                                <p><strong>工程部件:</strong> ${record.componentPart || '未填写'}</p>
+                                <p><strong>记录时间:</strong> ${new Date(record.timestamp).toLocaleString()}</p>
+                            </div>
+                        </div>
+
+                        <div class="bg-gray-50 p-4 rounded-lg">
+                            <h3 class="text-lg font-semibold mb-3">测试条件</h3>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <p><strong>测试面:</strong> ${record.testSurface || '未填写'}</p>
+                                <p><strong>面状态:</strong> ${record.surfaceCondition || '未填写'}</p>
+                                <p><strong>测试角度:</strong> ${record.testAngle || '未填写'}</p>
+                            </div>
+                        </div>
+
+                        <div>
+                            <h3 class="text-lg font-semibold mb-3">回弹检测数据</h3>
+                            ${record.reboundData.map(group => `
+                                <div class="mb-4 border-b pb-3">
+                                    <h4 class="font-medium text-primary">测区 ${group.group}</h4>
+                                    
+                                    <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <div>
+                                            <h5 class="font-medium text-sm">回弹值 (MPa)</h5>
+                                            <div class="grid grid-cols-4 gap-2 mt-1">
+                                                ${group.reboundPoints.map((point, idx) => `
+                                                    <div class="text-center">
+                                                        <div class="text-xs text-gray-500">测${idx+1}</div>
+                                                        <div class="font-medium">${point || '-'}</div>
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+                                            <p class="mt-2"><strong>平均值:</strong> ${group.reboundAvg} MPa</p>
+                                        </div>
+                                        
+                                        <div>
+                                            <h5 class="font-medium text-sm">碳化深度 (mm)</h5>
+                                            <div class="grid grid-cols-3 gap-2 mt-1">
+                                                ${group.carbonizationPoints.map((point, idx) => `
+                                                    <div class="text-center">
+                                                        <div class="text-xs text-gray-500">测${idx+1}</div>
+                                                        <div class="font-medium">${point || '-'}</div>
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+                                            <p class="mt-2"><strong>平均值:</strong> ${group.carbonizationAvg} mm</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+    modal.classList.add('opacity-100', 'pointer-events-auto');
+    modal.querySelector('.modal-content').classList.add('scale-100');
+}
+
+        // 动态更新截面尺寸输入
+        function updateSectionSizeInputs(structureType) {
+            const container = document.getElementById('sectionSizeContainer');
+            container.innerHTML = ''; // 清空原有内容
+            
+            let inputsHtml = '';
+            switch(structureType) {
+                case '梁':
+                inputsHtml = `
+                        <div>
+                            <label class="block text-sm font-medium text-gray-500 mb-1">宽度(mm)</label>
+                            <input type="text" class="w-full px-3 py-3 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="宽度">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-500 mb-1">高度(mm)</label>
+                            <input type="text" class="w-full px-3 py-3 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="高度">
+                        </div>
+                    `;
+                    break;
+                case '柱':
+                    inputsHtml = `
+                        <div>
+                            <label class="block text-sm font-medium text-gray-500 mb-1">宽度(mm)</label>
+                            <input type="number" class="w-full px-3 py-3 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="宽度">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-500 mb-1">长度(mm)</label>
+                            <input type="number" class="w-full px-3 py-3 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="长度">
+                        </div>
+                    `;
+                    break;
+                case '板':
+                    inputsHtml = `
+                        <div>
+                            <label class="block text-sm font-medium text-gray-500 mb-1">厚度(mm)</label>
+                            <input type="number" class="w-full px-3 py-3 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="厚度">
+                        </div>
+                    `;
+                    break;
+                case '墙': // 新增墙结构
+                    inputsHtml = `
+                        <div>
+                            <label class="block text-sm font-medium text-gray-500 mb-1">厚度(mm)</label>
+                            <input type="number" class="w-full px-3 py-3 rounded-lg border border-gray-300 input-focus transition-all text-base" placeholder="厚度">
+                        </div>
+                    `;
+                    break;
+            }
+            container.insertAdjacentHTML('beforeend', inputsHtml);
+        }
+
+        // 初始化回弹数据组
+        function initializeReboundGroups() {
+    const reboundGroupsContainer = document.getElementById('reboundGroupsContainer');
+    if (reboundGroupsContainer) {
+        reboundGroupsContainer.innerHTML = '';
+        // 创建10组默认数据
+        for (let i = 0; i < 1; i++) {
+            addReboundGroup();
+        }
+    }
+}
+        function calculateGroupReboundAvg(group) {
+            const inputs = document.querySelectorAll(`.rebound-points-container[data-group="${group}"] input`);
+            let sum = 0;
+            let count = 0;
+            
+            inputs.forEach(input => {
+                const value = parseFloat(input.value);
+                if (!isNaN(value)) {
+                    sum += value;
+                    count++;
+                }
+            });
+            
+            const average = count > 0 ? (sum / count).toFixed(1) : '-';
+            document.querySelector(`.group-rebound-avg[data-group="${group}"]`).textContent = average;
+        }
+        // 初始化指定组的回弹数据输入框
+        function initializeReboundPointsForGroup(group) {
+            const container = document.querySelector(`.rebound-points-container[data-group="${group}"]`);
+            container.innerHTML = '';
+            
+            for (let point = 1; point <= 16; point++) {
+                const input = document.createElement('input');
+                input.type = 'number';
+                input.id = `rebound_g${group}_p${point}`;
+                input.placeholder = `测${point}`;
+                input.className = 'w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-center text-base';
+                input.addEventListener('input', function() {
+                    calculateGroupReboundAvg(group);
+                });
+                container.appendChild(input);
+            }
+            
+            // 计算并更新该组平均值
+            calculateGroupReboundAvg(group);
+        }
+
+        // 初始化保护层厚度输入框
+        function initializeCoverThicknessInputs() {
+    document.querySelectorAll('.cover-point').forEach(input => {
+        input.addEventListener('input', function() {
+            const group = this.dataset.group;
+            calculateCoverGroupAvg(group);
+        });
+    });
+}
+// 计算保护层厚度组平均值
+function calculateCoverGroupAvg(group) {
+    const inputs = document.querySelectorAll(`.cover-point[data-group="${group}"]`);
+    let sum = 0;
+    let count = 0;
+    
+    inputs.forEach(input => {
+        const value = parseFloat(input.value);
+        if (!isNaN(value)) {
+            sum += value;
+            count++;
+        }
+    });
+    
+    const avg = count > 0 ? (sum / count).toFixed(1) : '-';
+    document.querySelector(`.cover-avg[data-group="${group}"]`).textContent = avg;
+}
+
+        // 初始化事件监听
+        function initializeEventListeners() {
+            // 结构类型选择按钮
+            document.getElementById('beamBtn').addEventListener('click', () => setStructureType('beam'));
+            document.getElementById('slabBtn').addEventListener('click', () => setStructureType('slab'));
+            document.getElementById('columnBtn').addEventListener('click', () => setStructureType('column'));
+            document.getElementById('wallBtn').addEventListener('click', () => setStructureType('wall')); // 新增墙结构
+            // 添加回弹数据组按钮
+            document.getElementById('addReboundGroupBtn').addEventListener('click', addReboundGroup);
+        }
+
+        // 设置当前结构类型
+        function setStructureType(type) {
+            currentStructureType = type;
+            
+            // 更新按钮样式
+            document.querySelectorAll('.structure-type-btn').forEach(btn => {
+                btn.classList.remove('border-primary', 'bg-primary/5', 'text-primary');
+                btn.classList.add('border-gray-200', 'text-gray-500');
+            });
+            
+            const activeBtn = document.getElementById(`${type}Btn`);
+            activeBtn.classList.remove('border-gray-200', 'text-gray-500');
+            activeBtn.classList.add('border-primary', 'bg-primary/5', 'text-primary');
+            
+            // 更新标题
+            let typeText = '梁';
+            if (type === 'slab') typeText = '板';
+            if (type === 'column') typeText = '柱';
+            if (type === 'wall') typeText = '墙'; // 新增墙结构
+            document.getElementById('currentStructureType').textContent = typeText;
+            // 重置所有输入框为初始状态
+            resetAllInputs();
+        }
+
+        function resetAllInputs() {
+            // 检测部位输入框
+            const basicInfoIds = ['inspectionLocation'];
+            basicInfoIds.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.value = '';
+                }
+            });
+
+            // 层高数据
+            document.getElementById('componentName').value = '';
+            document.getElementById('heightLocation').value = '';
+            document.getElementById('floorHeight').value = '';
+
+            // 重置保护层厚度
+    document.querySelectorAll('.cover-point').forEach(input => {
+        input.value = '';
+    });
+    document.querySelectorAll('.cover-avg').forEach(span => {
+        span.textContent = '-';
+    });
+            
+            // 截面尺寸输入框
+            const sectionSizeContainer = document.getElementById('sectionSizeContainer');
+            if (sectionSizeContainer) {
+                sectionSizeContainer.querySelectorAll('input').forEach(input => {
+                    input.value = '';
+                });
+            };
+            document.querySelectorAll('.stirrup-spacing-input').forEach(input => {
+                        input.value = '';
+                    });
+                    document.getElementById('stirrupNonEncryptedAvg').textContent = '-';
+                    document.getElementById('stirrupEncryptedAvg').textContent = '-';
+            // 钢筋信息输入框
+            const mainRebarGroups = document.querySelectorAll('.main-rebar-group');
+            mainRebarGroups.forEach(group => {
+                group.querySelectorAll('input, select').forEach(input => {
+                    // 跳过钢筋类型的输入框
+                    if (!input.closest('div').querySelector('label').textContent.includes('钢筋类型')) {
+                        input.value = '';
+                    }
+                });
+            });
+
+            const stirrupInfoIds = ['stirrupGrade', 'stirrupDiameter', 'stirrupSpacing加密区', 'stirrupSpacing非加密区', 'stirrupLegs'];
+            stirrupInfoIds.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.value = '';
+                }
+            });
+
+            const slabRebarAreas = document.querySelectorAll('.slab-rebar');
+    slabRebarAreas.forEach(area => {
+        area.querySelectorAll('input, select').forEach(input => {
+            // 添加空值检查
+            const labelElement = input.closest('div')?.querySelector('label');
+            if (labelElement && !labelElement.textContent.includes('钢筋类型')) {
+                input.value = '';
+            }
+        });
+    });
+    document.querySelectorAll('.slab-spacing-input').forEach(input => {
+        input.value = '';
+    });
+            
+            // 墙结构重置
+            const wallRebarAreas = document.querySelectorAll('.wall-rebar');
+    wallRebarAreas.forEach(area => {
+        area.querySelectorAll('input, select').forEach(input => {
+            // 添加空值检查
+            const labelElement = input.closest('div')?.querySelector('label');
+            if (labelElement && !labelElement.textContent.includes('钢筋类型')) {
+                input.value = '';
+            }
+        });
+    });
+    document.querySelectorAll('.wall-spacing-input').forEach(input => {
+        input.value = '';
+    });
+
+
+
+    // 工程部件
+    document.getElementById('componentPart').value = '';
+    
+    // 测试面（下拉框）
+    document.getElementById('testSurface').value = '';
+    
+    // 面状态（下拉框）
+    document.getElementById('surfaceCondition').value = '';
+    
+    // 测试角度（下拉框）
+    document.getElementById('testAngle').value = '';
+            // 回弹检测数据输入框
+            const reboundGroups = document.querySelectorAll('.rebound-group-wrapper');
+            reboundGroups.forEach(group => {
+                group.querySelectorAll('input').forEach(input => {
+                    input.value = '';
+                });
+            });
+            reboundGroups.forEach(groupWrapper => {
+        const group = groupWrapper.querySelector('.rebound-points-container').dataset.group;
+        calculateGroupReboundAvg(group);
+        calculateGroupCarbonizationAvg(group);
+    });
+            
+            // 碳化深度输入框
+            const carbonizationGroups = document.querySelectorAll('.carbonization-group');
+            carbonizationGroups.forEach(group => {
+                group.querySelectorAll('input').forEach(input => {
+                    input.value = '';
+                });
+            });
+   
+            // 重置碳化深度组平均值
+            document.querySelectorAll('.group-carbonization-avg').forEach(el => {
+                el.textContent = '-';
+            });
+            
+            // 重置板结构间距平均值 - 使用正确的ID
+    const slabAvgIds = [
+        'digitalAxisNonEncryptedAvg', 'digitalAxisEncryptedAvg',
+        'letterAxisNonEncryptedAvg', 'letterAxisEncryptedAvg'
+    ];
+    
+    slabAvgIds.forEach(id => {
+        const element = document.getElementById(id);
+        if (element) {
+            element.textContent = '-';
+        }
+    });
+    
+    // 重置墙结构间距平均值 - 使用正确的ID
+    const wallAvgIds = [
+        'wallHorizontalNonEncryptedAvg', 'wallHorizontalEncryptedAvg',
+        'wallVerticalNonEncryptedAvg', 'wallVerticalEncryptedAvg'
+    ];
+    
+    wallAvgIds.forEach(id => {
+        const element = document.getElementById(id);
+        if (element) {
+            element.textContent = '-';
+        }
+    });
+
+
+        }
+
+        // 添加回弹数据测点
+        function addReboundPoint(group) {
+            const container = document.querySelector(`.rebound-points-container[data-group="${group}"]`);
+            const pointsCount = container.querySelectorAll('input').length;
+            const newPoint = pointsCount + 1;
+            
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.id = `rebound_g${group}_p${newPoint}`;
+            input.placeholder = `测${newPoint}`;
+            input.className = 'w-full px-2 py-2 rounded-lg border border-gray-300 input-focus transition-all text-center text-base';
+            input.addEventListener('input', function() {
+                calculateGroupAverage(group);
+            });
+            container.appendChild(input);
+            
+            // 更新总测点数显示
+            updateTotalReboundPoints();
+            
+            // 重新计算该组平均值
+            calculateGroupAverage(group);
+        }
+
+
+        // 计算指定组的平均值
+        function calculateGroupAverage(group) {
+            const inputs = document.querySelectorAll(`[id^="rebound_g${group}_p"]`);
+            let sum = 0;
+            let count = 0;
+            
+            inputs.forEach(input => {
+                const value = parseFloat(input.value);
+                if (!isNaN(value)) {
+                    sum += value;
+                    count++;
+                }
+            });
+            
+            const average = count > 0 ? (sum / count).toFixed(1) : '-';
+            document.querySelector(`.group-average[data-group="${group}"]`).textContent = average;
+        }
+
+
+
+
+        // 更新总回弹测点数显示
+        function updateTotalReboundPoints() {
+            let totalPoints = 0;
+            
+            for (let group = 1; group <= reboundGroups; group++) {
+                const inputs = document.querySelectorAll(`[id^="rebound_g${group}_p"]`);
+                totalPoints += inputs.length;
+            }
+            
+            document.getElementById('totalReboundPoints').textContent = `共${totalPoints}个测点`;
+        }
+
+        /**
+         * 收集表单数据（包含动态生成内容）
+         * @returns {Object} 结构化的检测数据
+         */
+         function collectFormData() {
+    // 基础信息（添加空值保护）
+    const getElementValue = (id) => {
+        const el = document.getElementById(id);
+        return el ? el.value : ''; // 元素不存在时返回空字符串
+    };
+    const projectName = getElementValue('projectName');
+    const inspectionDate = getElementValue('inspectionDate');
+    const inspector = getElementValue('inspector');
+    const inspectionLocation = getElementValue('inspectionLocation');
+    const remarks = getElementValue('remarks');
+
+    // 结构类型（添加空值保护）
+    const structureTypeEl = document.getElementById('currentStructureType');
+    const structureType = structureTypeEl ? structureTypeEl.textContent.trim() : '';
+
+    // 层高数据
+    const heightData = {
+        componentName: document.getElementById('componentName').value || '',
+        location: document.getElementById('heightLocation').value || '',
+        height: document.getElementById('floorHeight').value || null
+    };
+
+    // 截面尺寸（添加空值保护）
+    const sectionSize = {};
+    const sectionSizeContainer = document.getElementById('sectionSizeContainer');
+    if (sectionSizeContainer) {
+        sectionSizeContainer.querySelectorAll('input').forEach(input => {
+            // 使用占位文本作为键
+            const placeholder = input.placeholder.replace('如: ', '').split(' ')[0];
+            sectionSize[placeholder] = input.value || null;
+        });
+    }
+
+    // 钢筋信息（添加空值保护）
+    let rebarInfo = {};
+    if (structureType === '板') {
+        rebarInfo = {
+            digitalAxis: {
+                rebarType: document.querySelector('#digitalAxisRebar input[type="text"]')?.value || '',
+                grade: document.querySelector('#digitalAxisRebar select')?.value || '',
+                diameter: document.querySelector('#digitalAxisRebar input[placeholder="直径"]')?.value || '',
+                // 非加密区
+                spacingNonEncrypted: Array.from(document.querySelectorAll('.slab-digital-non-encrypted')).map(i => i.value),
+                spacingNonEncryptedAvg: document.getElementById('digitalAxisNonEncryptedAvg')?.textContent || '-',
+                // 加密区
+                spacingEncrypted: Array.from(document.querySelectorAll('.slab-digital-encrypted')).map(i => i.value),
+                spacingEncryptedAvg: document.getElementById('digitalAxisEncryptedAvg')?.textContent || '-'
+            },
+            letterAxis: {
+                rebarType: document.querySelector('#letterAxisRebar input[type="text"]')?.value || '',
+                grade: document.querySelector('#letterAxisRebar select')?.value || '',
+                diameter: document.querySelector('#letterAxisRebar input[placeholder="直径"]')?.value || '',
+                // 非加密区
+                spacingNonEncrypted: Array.from(document.querySelectorAll('.slab-letter-non-encrypted')).map(i => i.value),
+                spacingNonEncryptedAvg: document.getElementById('letterAxisNonEncryptedAvg')?.textContent || '-',
+                // 加密区
+                spacingEncrypted: Array.from(document.querySelectorAll('.slab-letter-encrypted')).map(i => i.value),
+                spacingEncryptedAvg: document.getElementById('letterAxisEncryptedAvg')?.textContent || '-'
+            }
+        };
+    } else if (structureType === '梁' || structureType === '柱') {
+        // 主筋信息
+        rebarInfo.mainRebars = [];
+        if (structureType === '梁') {
+            document.querySelectorAll('#mainRebarContainer .main-rebar-group').forEach(group => {
+                const inputs = group.querySelectorAll('input');
+                const select = group.querySelector('select');
+                rebarInfo.mainRebars.push({
+                    type: inputs[0].value,    // 钢筋类型
+                    count: inputs[1].value,   // 钢筋数量
+                    grade: select.value,
+                    diameter: inputs[2].value // 钢筋直径
+                });
+            });
+        } else { // 柱结构
+            rebarInfo.mainRebars = {
+                bFace: Array.from(document.querySelectorAll('#bFaceMainRebarContainer .main-rebar-group')).map(group => {
+                    const inputs = group.querySelectorAll('input');
+                    const select = group.querySelector('select');
+                    return {
+                        type: inputs[0].value,    // 钢筋类型
+                        count: inputs[1].value,   // 钢筋数量
+                        grade: select.value,
+                        diameter: inputs[2].value // 钢筋直径
+                    };
+                }),
+                hFace: Array.from(document.querySelectorAll('#hFaceMainRebarContainer .main-rebar-group')).map(group => {
+                    const inputs = group.querySelectorAll('input');
+                    const select = group.querySelector('select');
+                    return {
+                        type: inputs[0].value,
+                        count: inputs[1].value,
+                        grade: select.value,
+                        diameter: inputs[2].value
+                    };
+                })
+            };
+        }
+
+        // 箍筋信息
+        rebarInfo.stirrup = {
+            grade: getElementValue('stirrupGrade'),
+            diameter: getElementValue('stirrupDiameter'),
+            legs: getElementValue('stirrupLegs'),
+            spacingNonEncrypted: Array.from(document.querySelectorAll('.stirrup-non-encrypted'))
+                .map(input => input.value || null),
+            spacingNonEncryptedAvg: document.getElementById('stirrupNonEncryptedAvg')?.textContent || '-',
+            spacingEncrypted: Array.from(document.querySelectorAll('.stirrup-encrypted'))
+                .map(input => input.value || null),
+            spacingEncryptedAvg: document.getElementById('stirrupEncryptedAvg')?.textContent || '-'
+        };
+    } else if (structureType === '墙') {
+        rebarInfo = {
+            horizontal: {
+                rebarType: document.querySelector('.wall-rebar > div:first-child input[type="text"]')?.value || '',
+                grade: document.querySelector('.wall-rebar > div:first-child select')?.value || '',
+                diameter: document.querySelector('.wall-rebar > div:first-child input[placeholder="直径"]')?.value || '',
+                // 非加密区
+                spacingNonEncrypted: Array.from(document.querySelectorAll('.wall-horizontal-non-encrypted')).map(i => i.value),
+                spacingNonEncryptedAvg: document.getElementById('wallHorizontalNonEncryptedAvg')?.textContent || '-',
+                // 加密区
+                spacingEncrypted: Array.from(document.querySelectorAll('.wall-horizontal-encrypted')).map(i => i.value),
+                spacingEncryptedAvg: document.getElementById('wallHorizontalEncryptedAvg')?.textContent || '-'
+            },
+            vertical: {
+                rebarType: document.querySelector('.wall-rebar > div:last-child input[type="text"]')?.value || '',
+                grade: document.querySelector('.wall-rebar > div:last-child select')?.value || '',
+                diameter: document.querySelector('.wall-rebar > div:last-child input[placeholder="直径"]')?.value || '',
+                // 非加密区
+                spacingNonEncrypted: Array.from(document.querySelectorAll('.wall-vertical-non-encrypted')).map(i => i.value),
+                spacingNonEncryptedAvg: document.getElementById('wallVerticalNonEncryptedAvg')?.textContent || '-',
+                // 加密区
+                spacingEncrypted: Array.from(document.querySelectorAll('.wall-vertical-encrypted')).map(i => i.value),
+                spacingEncryptedAvg: document.getElementById('wallVerticalEncryptedAvg')?.textContent || '-'
+            }
+        };
+    }
+
+    // 回弹检测数据
+    const reboundData = [];
+            document.querySelectorAll('.rebound-group-wrapper').forEach((group, index) => {
+                // 回弹数据
+                const reboundPoints = Array.from(group.querySelectorAll('.rebound-points-container input'))
+                    .map(input => input.value || null);
+                const reboundAvg = group.querySelector('.group-rebound-avg')?.textContent || '-';
+                
+                // 碳化深度数据
+                const carbonizationPoints = Array.from(group.querySelectorAll('.carbonization-points-container input'))
+                    .map(input => input.value || null);
+                const carbonizationAvg = group.querySelector('.group-carbonization-avg')?.textContent || '-';
+                
+                reboundData.push({ 
+                    group: index + 1, 
+                    reboundPoints,
+                    reboundAvg,
+                    carbonizationPoints,
+                    carbonizationAvg
+                });
+            });
+
+    // 混凝土保护层厚度
+    const coverThickness = [];
+    document.querySelectorAll('.cover-group').forEach((group, index) => {
+        const inputs = group.querySelectorAll('.cover-point');
+        coverThickness.push({
+            group: index + 1,
+            point1: inputs[0].value || null,
+            point2: inputs[1].value || null,
+            average: group.querySelector('.cover-avg').textContent
+        });
+    });
+    
+    return {
+        id: Date.now().toString(),
+        timestamp: new Date().toISOString(),
+        projectName,
+        inspectionDate,
+        inspector,
+        inspectionLocation,
+        structureType,
+        heightData,
+        sectionSize,
+        rebarInfo,
+        reboundData,
+        coverThickness,
+        remarks
+    };
+}
+
+        // 修改保存记录函数 - 将新记录添加到数组开头
+        function saveRecord(record) {
+            const existingRecords = JSON.parse(localStorage.getItem('inspectionRecords')) || [];
+            // 将新记录添加到数组开头（最上方）
+            existingRecords.unshift(record);
+            localStorage.setItem('inspectionRecords', JSON.stringify(existingRecords));
+        }
+
+        /**
+         * 读取所有历史记录
+         * @returns {Array} 历史记录数组
+         */
+        function getHistoryRecords() {
+            return JSON.parse(localStorage.getItem('inspectionRecords')) || [];
+        }
+
+        /**
+         * 删除指定记录
+         * @param {string} recordId 记录ID
+         */
+        function deleteRecord(recordId) {
+            const records = getHistoryRecords().filter(record => record.id !== recordId);
+            localStorage.setItem('inspectionRecords', JSON.stringify(records));
+        }
+
+        /**
+         * 导出检测记录为 Excel 文件
+         */
+         function exportToExcel() {
+    // 读取所有历史记录
+    const records = getHistoryRecords();
+    if (records.length === 0) {
+        alert('无记录可导出');
+        return;
+    }
+
+    // 分离钢筋数据和回弹数据
+    const rebarRecords = records.filter(r => r.recordType === 'rebar');
+    const reboundRecords = records.filter(r => r.recordType === 'rebound');
+
+    // 创建工作簿
+    const workbook = XLSX.utils.book_new();
+
+    // 处理钢筋数据
+    if (rebarRecords.length > 0) {
+        const rebarData = rebarRecords.map(record => {
+            const row = {
+                '项目名称': record.projectName,
+                '检测日期': record.inspectionDate,
+                '检测人员': record.inspector,
+                '检测部位': record.inspectionLocation,
+                '结构类型': record.structureType,
+                '记录时间': new Date(record.timestamp).toLocaleString(),
+                '构件名称': record.heightData.componentName,
+                '层高检测部位': record.heightData.location,
+                '层高(mm)': record.heightData.height
+            };
+
+            // 添加截面尺寸
+            Object.entries(record.sectionSize).forEach(([key, value]) => {
+                row[`截面尺寸-${key}`] = value;
+            });
+
+            // 添加保护层厚度
+            record.coverThickness?.forEach((area, index) => {
+                row[`保护层-测区${index+1}-测点1`] = area.point1;
+                row[`保护层-测区${index+1}-测点2`] = area.point2;
+                row[`保护层-测区${index+1}-平均值`] = area.average;
+            });
+
+            // 添加钢筋信息
+            if (record.structureType === '板') {
+                addSlabRebarData(row, record.rebarInfo);
+            } 
+            else if (record.structureType === '梁') {
+                addBeamRebarData(row, record.rebarInfo);
+            } 
+            else if (record.structureType === '柱') {
+                addColumnRebarData(row, record.rebarInfo);
+            }
+            else if (record.structureType === '墙') {
+                addWallRebarData(row, record.rebarInfo);
+            }
+
+            // 添加备注
+            row['备注'] = record.remarks || '';
+            
+            return row;
+        });
+
+        const rebarWorksheet = XLSX.utils.json_to_sheet(rebarData);
+        XLSX.utils.book_append_sheet(workbook, rebarWorksheet, '钢筋检测记录');
+    }
+
+    // 处理混凝土回弹数据
+    if (reboundRecords.length > 0) {
+        const reboundData = reboundRecords.flatMap(record => {
+            return record.reboundData.map(group => {
+                const row = {
+                    '项目名称': record.projectName,
+                    '检测日期': record.inspectionDate,
+                    '检测人员': record.inspector,
+                    '记录时间': new Date(record.timestamp).toLocaleString(),
+                    '工程部件': record.componentPart,
+                    '测试面': record.testSurface,
+                    '面状态': record.surfaceCondition,
+                    '测试角度': record.testAngle,
+                    '测区编号': group.group
+                };
+
+                // 添加回弹值
+                group.reboundPoints.forEach((point, i) => {
+                    row[`回弹值-测点${i+1}`] = point;
+                });
+                row['回弹平均值'] = group.reboundAvg;
+
+                // 添加碳化深度
+                group.carbonizationPoints.forEach((point, i) => {
+                    row[`碳化深度-测点${i+1}`] = point;
+                });
+                row['碳化深度平均值'] = group.carbonizationAvg;
+                
+                return row;
+            });
+        });
+
+        const reboundWorksheet = XLSX.utils.json_to_sheet(reboundData);
+        XLSX.utils.book_append_sheet(workbook, reboundWorksheet, '混凝土回弹记录');
+    }
+
+    // 生成并下载 Excel 文件
+    XLSX.writeFile(workbook, `结构检测记录_${new Date().toLocaleDateString()}.xlsx`);
+}
+
+// 添加板结构钢筋数据
+function addSlabRebarData(row, rebarInfo) {
+    // 数字轴钢筋
+    row['数字轴-钢筋类型'] = rebarInfo.digitalAxis?.rebarType;
+    row['数字轴-钢筋等级'] = rebarInfo.digitalAxis?.grade;
+    row['数字轴-钢筋直径(mm)'] = rebarInfo.digitalAxis?.diameter;
+    
+    // 数字轴非加密区间距
+    rebarInfo.digitalAxis?.spacingNonEncrypted?.forEach((val, i) => {
+        row[`数字轴-非加密区间距-测${i+1}`] = val;
+    });
+    row['数字轴-非加密区间距平均值'] = rebarInfo.digitalAxis?.spacingNonEncryptedAvg;
+    
+    // 数字轴加密区间距
+    rebarInfo.digitalAxis?.spacingEncrypted?.forEach((val, i) => {
+        row[`数字轴-加密区间距-测${i+1}`] = val;
+    });
+    row['数字轴-加密区间距平均值'] = rebarInfo.digitalAxis?.spacingEncryptedAvg;
+    
+    // 字母轴钢筋
+    row['字母轴-钢筋类型'] = rebarInfo.letterAxis?.rebarType;
+    row['字母轴-钢筋等级'] = rebarInfo.letterAxis?.grade;
+    row['字母轴-钢筋直径(mm)'] = rebarInfo.letterAxis?.diameter;
+    
+    // 字母轴非加密区间距
+    rebarInfo.letterAxis?.spacingNonEncrypted?.forEach((val, i) => {
+        row[`字母轴-非加密区间距-测${i+1}`] = val;
+    });
+    row['字母轴-非加密区间距平均值'] = rebarInfo.letterAxis?.spacingNonEncryptedAvg;
+    
+    // 字母轴加密区间距
+    rebarInfo.letterAxis?.spacingEncrypted?.forEach((val, i) => {
+        row[`字母轴-加密区间距-测${i+1}`] = val;
+    });
+    row['字母轴-加密区间距平均值'] = rebarInfo.letterAxis?.spacingEncryptedAvg;
+}
+
+// 添加梁结构钢筋数据
+function addBeamRebarData(row, rebarInfo) {
+    // 主筋信息
+    rebarInfo.mainRebars?.forEach((rebar, i) => {
+        const prefix = `主筋组${i+1}-`;
+        row[prefix + '钢筋类型'] = rebar.type;
+        row[prefix + '钢筋数量'] = rebar.count;
+        row[prefix + '钢筋等级'] = rebar.grade;
+        row[prefix + '钢筋直径(mm)'] = rebar.diameter;
+    });
+    
+    // 箍筋信息
+    row['箍筋-钢筋等级'] = rebarInfo.stirrup?.grade;
+    row['箍筋-钢筋直径(mm)'] = rebarInfo.stirrup?.diameter;
+    row['箍筋-肢数'] = rebarInfo.stirrup?.legs;
+    
+    // 非加密区间距
+    rebarInfo.stirrup?.spacingNonEncrypted?.forEach((val, i) => {
+        row[`箍筋-非加密区间距-测${i+1}`] = val;
+    });
+    row['箍筋-非加密区间距平均值'] = rebarInfo.stirrup?.spacingNonEncryptedAvg;
+    
+    // 加密区间距
+    rebarInfo.stirrup?.spacingEncrypted?.forEach((val, i) => {
+        row[`箍筋-加密区间距-测${i+1}`] = val;
+    });
+    row['箍筋-加密区间距平均值'] = rebarInfo.stirrup?.spacingEncryptedAvg;
+}
+
+// 添加柱结构钢筋数据
+function addColumnRebarData(row, rebarInfo) {
+    // B面主筋
+    rebarInfo.mainRebars?.bFace?.forEach((rebar, i) => {
+        const prefix = `B面主筋组${i+1}-`;
+        row[prefix + '钢筋类型'] = rebar.type;
+        row[prefix + '钢筋数量'] = rebar.count;
+        row[prefix + '钢筋等级'] = rebar.grade;
+        row[prefix + '钢筋直径(mm)'] = rebar.diameter;
+    });
+    
+    // H面主筋
+    rebarInfo.mainRebars?.hFace?.forEach((rebar, i) => {
+        const prefix = `H面主筋组${i+1}-`;
+        row[prefix + '钢筋类型'] = rebar.type;
+        row[prefix + '钢筋数量'] = rebar.count;
+        row[prefix + '钢筋等级'] = rebar.grade;
+        row[prefix + '钢筋直径(mm)'] = rebar.diameter;
+    });
+    
+    // 箍筋信息（与梁结构相同）
+    addBeamRebarData(row, rebarInfo);
+}
+
+// 添加墙结构钢筋数据
+function addWallRebarData(row, rebarInfo) {
+    // 横筋配置
+    row['横筋-钢筋类型'] = rebarInfo.horizontal?.rebarType;
+    row['横筋-钢筋等级'] = rebarInfo.horizontal?.grade;
+    row['横筋-钢筋直径(mm)'] = rebarInfo.horizontal?.diameter;
+    
+    // 横筋非加密区间距
+    rebarInfo.horizontal?.spacingNonEncrypted?.forEach((val, i) => {
+        row[`横筋-非加密区间距-测${i+1}`] = val;
+    });
+    row['横筋-非加密区间距平均值'] = rebarInfo.horizontal?.spacingNonEncryptedAvg;
+    
+    // 横筋加密区间距
+    rebarInfo.horizontal?.spacingEncrypted?.forEach((val, i) => {
+        row[`横筋-加密区间距-测${i+1}`] = val;
+    });
+    row['横筋-加密区间距平均值'] = rebarInfo.horizontal?.spacingEncryptedAvg;
+    
+    // 纵筋配置
+    row['纵筋-钢筋类型'] = rebarInfo.vertical?.rebarType;
+    row['纵筋-钢筋等级'] = rebarInfo.vertical?.grade;
+    row['纵筋-钢筋直径(mm)'] = rebarInfo.vertical?.diameter;
+    
+    // 纵筋非加密区间距
+    rebarInfo.vertical?.spacingNonEncrypted?.forEach((val, i) => {
+        row[`纵筋-非加密区间距-测${i+1}`] = val;
+    });
+    row['纵筋-非加密区间距平均值'] = rebarInfo.vertical?.spacingNonEncryptedAvg;
+    
+    // 纵筋加密区间距
+    rebarInfo.vertical?.spacingEncrypted?.forEach((val, i) => {
+        row[`纵筋-加密区间距-测${i+1}`] = val;
+    });
+    row['纵筋-加密区间距平均值'] = rebarInfo.vertical?.spacingEncryptedAvg;
+}
+    </script>
+</body>
+</html>
